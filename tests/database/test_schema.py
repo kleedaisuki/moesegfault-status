@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
-MIGRATION = ROOT / "migrations" / "0001_initial.sql"
+MIGRATIONS = tuple(sorted((ROOT / "migrations").glob("*.sql")))
 NOW = "2026-09-12T08:00:00.000Z"
 LATER = "2026-09-13T08:00:00.000Z"
 
@@ -28,7 +28,8 @@ class SchemaTestCase(unittest.TestCase):
         self.db = sqlite3.connect(":memory:")
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA foreign_keys = ON")
-        self.db.executescript(MIGRATION.read_text(encoding="utf-8"))
+        for migration in MIGRATIONS:
+            self.db.executescript(migration.read_text(encoding="utf-8"))
 
     def tearDown(self) -> None:
         """关闭测试连接。 / Close the test connection."""
@@ -141,6 +142,80 @@ class SchemaTestCase(unittest.TestCase):
                       ?, ?, 'default', 1)
             """,
             (issue_id, recurrence_of, fingerprint, service, NOW, NOW),
+        )
+
+    def add_upload_session(
+        self,
+        upload_id: str,
+        deployment_id: str,
+        idempotency_key: str,
+        object_key: str,
+    ) -> None:
+        """插入不可变 artifact 上传会话。 / Insert an immutable artifact upload session."""
+
+        values = (
+            upload_id,
+            deployment_id,
+            idempotency_key,
+            "sha256:" + "3" * 64,
+            object_key,
+            "sha256:" + "4" * 64,
+            LATER,
+            NOW,
+        )
+        columns = {
+            row["name"] for row in self.db.execute("PRAGMA table_info(artifact_upload_sessions)")
+        }
+        if "content_md5" in columns:
+            self.db.execute(
+                """
+                INSERT INTO artifact_upload_sessions(
+                    upload_id, deployment_id, idempotency_key, request_digest,
+                    object_key, kind, file_name, media_type, size_bytes,
+                    artifact_digest, expires_at, created_at, created_by, content_md5
+                ) VALUES (?, ?, ?, ?, ?, 'source_map', 'app.js.map',
+                          'application/json', 128, ?, ?, ?, 'ci', ?)
+                """,
+                (*values, "QUFBQUFBQUFBQUFBQUFBQQ=="),
+            )
+            return
+        self.db.execute(
+            """
+            INSERT INTO artifact_upload_sessions(
+                upload_id, deployment_id, idempotency_key, request_digest,
+                object_key, kind, file_name, media_type, size_bytes,
+                artifact_digest, expires_at, created_at, created_by
+            ) VALUES (?, ?, ?, ?, ?, 'source_map', 'app.js.map',
+                      'application/json', 128, ?, ?, ?, 'ci')
+            """,
+            values,
+        )
+
+    def add_artifact(
+        self,
+        artifact_id: str,
+        deployment_id: str,
+        upload_id: str,
+        object_key: str,
+    ) -> None:
+        """按上传会话提交 artifact。 / Commit an artifact against its upload session."""
+
+        self.db.execute(
+            """
+            INSERT INTO deployment_artifacts(
+                artifact_id, deployment_id, upload_id, kind, file_name,
+                object_key, media_type, size_bytes, artifact_digest, created_at
+            ) VALUES (?, ?, ?, 'source_map', 'app.js.map', ?,
+                      'application/json', 128, ?, ?)
+            """,
+            (
+                artifact_id,
+                deployment_id,
+                upload_id,
+                object_key,
+                "sha256:" + "4" * 64,
+                NOW,
+            ),
         )
 
 
@@ -260,10 +335,11 @@ class ProvenanceAndPolicyTests(SchemaTestCase):
         self.db.execute(
             """
             INSERT INTO service_diagnostic_policies(
-                service_name, policy_id, policy_revision, assigned_by, assigned_at
-            ) VALUES ('identity', 'default', 1, 'ops', ?)
+                assignment_id, selector_kind, service_name, policy_id,
+                policy_revision, assigned_by, assigned_at
+            ) VALUES (?, 'service_default', 'identity', 'default', 1, 'ops', ?)
             """,
-            (NOW,),
+            (uuid7(40), NOW),
         )
         with self.assertRaisesRegex(sqlite3.IntegrityError, "immutable"):
             self.db.execute(
@@ -273,10 +349,11 @@ class ProvenanceAndPolicyTests(SchemaTestCase):
             self.db.execute(
                 """
                 INSERT INTO service_diagnostic_policies(
-                    service_name, policy_id, policy_revision, assigned_by, assigned_at
-                ) VALUES ('gateway', 'default', 99, 'ops', ?)
+                    assignment_id, selector_kind, service_name, policy_id,
+                    policy_revision, assigned_by, assigned_at
+                ) VALUES (?, 'service_default', 'gateway', 'default', 99, 'ops', ?)
                 """,
-                (NOW,),
+                (uuid7(41), NOW),
             )
 
     def test_diagnostic_deployment_must_belong_to_service(self) -> None:
@@ -338,11 +415,300 @@ class ProvenanceAndPolicyTests(SchemaTestCase):
         self.assertEqual(row["deployment_id"], self.deployment_id)
 
 
+class MigrationEvolutionTests(SchemaTestCase):
+    """验证增量迁移保留数据并解除错误的全局唯一性。 / Validate incremental migrations preserve data and remove incorrect global uniqueness."""
+
+    def reset_to_initial_schema(self) -> None:
+        """重建仅应用 0001 的数据库。 / Rebuild a database with only migration 0001 applied."""
+
+        self.db.close()
+        self.db = sqlite3.connect(":memory:")
+        self.db.row_factory = sqlite3.Row
+        self.db.execute("PRAGMA foreign_keys = ON")
+        self.db.executescript(MIGRATIONS[0].read_text(encoding="utf-8"))
+
+    def test_0002_preserves_rows_and_allows_cross_deployment_object_reuse(self) -> None:
+        """0002 必须保留旧行，并允许续签及跨部署复用对象键。 / 0002 must preserve rows and allow renewal and cross-deployment key reuse."""
+
+        self.reset_to_initial_schema()
+        self.add_service("identity")
+        first_deployment = self.add_deployment("identity", 50, artifact_hex="5")
+        second_deployment = self.add_deployment("identity", 51, artifact_hex="5")
+        shared_key = "observability/artifacts/sha256/shared/app.js.map"
+        first_upload = uuid7(52)
+        first_artifact = uuid7(53)
+        self.add_upload_session(first_upload, first_deployment, "first", shared_key)
+        self.add_artifact(first_artifact, first_deployment, first_upload, shared_key)
+        self.db.commit()
+
+        self.db.executescript(MIGRATIONS[1].read_text(encoding="utf-8"))
+
+        renewed_upload = uuid7(54)
+        second_upload = uuid7(55)
+        second_artifact = uuid7(56)
+        self.add_upload_session(renewed_upload, first_deployment, "renewed", shared_key)
+        self.add_upload_session(second_upload, second_deployment, "second", shared_key)
+        self.add_artifact(second_artifact, second_deployment, second_upload, shared_key)
+
+        self.assertEqual(
+            self.db.execute(
+                "SELECT COUNT(*) FROM artifact_upload_sessions WHERE object_key=?",
+                (shared_key,),
+            ).fetchone()[0],
+            3,
+        )
+        artifacts = self.db.execute(
+            """
+            SELECT deployment_id, artifact_id
+            FROM deployment_artifacts WHERE object_key=? ORDER BY deployment_id
+            """,
+            (shared_key,),
+        ).fetchall()
+        self.assertEqual(len(artifacts), 2)
+        self.assertIn(first_artifact, {row["artifact_id"] for row in artifacts})
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.add_artifact(uuid7(57), first_deployment, renewed_upload, shared_key)
+        self.assertEqual(self.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_0003_migrates_legacy_assignment_to_service_default(self) -> None:
+        """0003 必须为旧服务级 assignment 建立稳定 ID 和默认 selector。 / 0003 must give legacy service assignments stable IDs and default selectors."""
+
+        self.reset_to_initial_schema()
+        self.add_service("identity")
+        self.add_policy()
+        self.db.execute(
+            """
+            INSERT INTO service_diagnostic_policies(
+                service_name, policy_id, policy_revision, assigned_by, assigned_at
+            ) VALUES ('identity', 'default', 1, 'ops', ?)
+            """,
+            (NOW,),
+        )
+        self.db.commit()
+
+        for migration in MIGRATIONS[1:3]:
+            self.db.executescript(migration.read_text(encoding="utf-8"))
+
+        row = self.db.execute(
+            """
+            SELECT assignment_id, selector_kind, service_name, diagnostic_kind
+            FROM service_diagnostic_policies
+            """
+        ).fetchone()
+        self.assertEqual(row["selector_kind"], "service_default")
+        self.assertEqual(row["service_name"], "identity")
+        self.assertIsNone(row["diagnostic_kind"])
+        self.assertEqual(len(row["assignment_id"]), 36)
+        self.assertEqual(row["assignment_id"][14], "7")
+        self.assertEqual(self.db.execute("PRAGMA foreign_key_check").fetchall(), [])
+
+    def test_policy_selector_precedence_and_uniqueness_are_deterministic(self) -> None:
+        """monitor、service kind、service default 必须按固定优先级唯一选择。 / Monitor, service-kind, and service-default selectors must resolve uniquely in fixed priority."""
+
+        self.add_service("identity")
+        self.add_policy("default")
+        self.add_policy("kind")
+        self.add_policy("monitor")
+        monitor_id = uuid7(60)
+        self.db.execute(
+            """
+            INSERT INTO monitors(
+                monitor_id, target_type, target_id, probe_kind, schedule_kind,
+                interval_seconds, timeout_ms, probe_config_json, policy_id,
+                policy_revision, next_run_at, created_at, updated_at
+            ) VALUES (?, 'service', 'identity', 'http', 'interval', 60, 1000,
+                      '{}', 'default', 1, ?, ?, ?)
+            """,
+            (monitor_id, NOW, NOW, NOW),
+        )
+        assignments = (
+            (uuid7(61), "service_default", None, "identity", None, "default"),
+            (uuid7(62), "service_kind", None, "identity", "health.probe_failed", "kind"),
+            (uuid7(63), "monitor", monitor_id, None, None, "monitor"),
+        )
+        self.db.executemany(
+            """
+            INSERT INTO service_diagnostic_policies(
+                assignment_id, selector_kind, monitor_id, service_name,
+                diagnostic_kind, policy_id, policy_revision, assigned_by, assigned_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 1, 'ops', ?)
+            """,
+            [(*assignment, NOW) for assignment in assignments],
+        )
+
+        def select_policy(origin_monitor: str | None, diagnostic_kind: str) -> str:
+            """执行 consumer 使用的固定 selector 查询。 / Run the consumer's deterministic selector query."""
+
+            row = self.db.execute(
+                """
+                SELECT policy_id
+                FROM service_diagnostic_policies
+                WHERE (selector_kind='monitor' AND monitor_id=:monitor_id)
+                   OR (selector_kind='service_kind' AND service_name=:service_name
+                       AND diagnostic_kind=:diagnostic_kind)
+                   OR (selector_kind='service_default' AND service_name=:service_name)
+                ORDER BY CASE selector_kind
+                    WHEN 'monitor' THEN 0
+                    WHEN 'service_kind' THEN 1
+                    ELSE 2
+                END
+                LIMIT 1
+                """,
+                {
+                    "monitor_id": origin_monitor,
+                    "service_name": "identity",
+                    "diagnostic_kind": diagnostic_kind,
+                },
+            ).fetchone()
+            assert row is not None
+            return str(row["policy_id"])
+
+        self.assertEqual(select_policy(monitor_id, "health.probe_failed"), "monitor")
+        self.assertEqual(select_policy(None, "health.probe_failed"), "kind")
+        self.assertEqual(select_policy(None, "dependency.unavailable"), "default")
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.db.execute(
+                """
+                INSERT INTO service_diagnostic_policies(
+                    assignment_id, selector_kind, monitor_id, policy_id,
+                    policy_revision, assigned_by, assigned_at
+                ) VALUES (?, 'monitor', ?, 'default', 1, 'ops', ?)
+                """,
+                (uuid7(64), monitor_id, NOW),
+            )
+
+    def test_0004_preserves_legacy_sessions_but_requires_md5_for_new_uploads(self) -> None:
+        """0004 保留旧会话/已提交记录，但新会话必须携带有效 MD5。 / 0004 preserves legacy sessions and commits but requires valid MD5 for new uploads."""
+
+        self.reset_to_initial_schema()
+        self.add_service("identity")
+        committed_deployment = self.add_deployment("identity", 70, artifact_hex="7")
+        pending_deployment = self.add_deployment("identity", 71, artifact_hex="8")
+        object_key = "observability/artifacts/sha256/md5-migration"
+        pending_key = "observability/artifacts/sha256/md5-pending"
+        committed_upload = uuid7(72)
+        pending_upload = uuid7(73)
+        self.add_upload_session(committed_upload, committed_deployment, "committed", object_key)
+        self.add_artifact(uuid7(74), committed_deployment, committed_upload, object_key)
+        self.add_upload_session(pending_upload, pending_deployment, "pending", pending_key)
+        self.db.commit()
+        for migration in MIGRATIONS[1:4]:
+            self.db.executescript(migration.read_text(encoding="utf-8"))
+
+        legacy = self.db.execute(
+            "SELECT content_md5 FROM artifact_upload_sessions WHERE upload_id=?",
+            (pending_upload,),
+        ).fetchone()
+        self.assertIsNone(legacy["content_md5"])
+        self.assertEqual(
+            self.db.execute(
+                "SELECT COUNT(*) FROM deployment_artifacts WHERE upload_id=?",
+                (committed_upload,),
+            ).fetchone()[0],
+            1,
+        )
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "checksummed upload session"):
+            self.add_artifact(uuid7(75), pending_deployment, pending_upload, pending_key)
+        with self.assertRaisesRegex(sqlite3.IntegrityError, "requires content_md5"):
+            self.db.execute(
+                """
+                INSERT INTO artifact_upload_sessions(
+                    upload_id, deployment_id, idempotency_key, request_digest,
+                    object_key, kind, file_name, media_type, size_bytes,
+                    artifact_digest, expires_at, created_at, created_by, content_md5
+                ) VALUES (?, ?, 'missing-md5', ?, ?, 'source_map', 'app.js.map',
+                          'application/json', 128, ?, ?, ?, 'ci', NULL)
+                """,
+                (
+                    uuid7(76),
+                    pending_deployment,
+                    "sha256:" + "3" * 64,
+                    pending_key,
+                    "sha256:" + "4" * 64,
+                    LATER,
+                    NOW,
+                ),
+            )
+        renewed_upload = uuid7(77)
+        self.add_upload_session(renewed_upload, pending_deployment, "renewed", pending_key)
+        self.add_artifact(uuid7(78), pending_deployment, renewed_upload, pending_key)
+
+    def test_unpinned_occurrence_cleanup_detaches_but_preserves_evidence(self) -> None:
+        """未固定 occurrence 清理后，永久 evidence 关系必须保留并解绑摘要。 / Cleaning an unpinned occurrence must preserve permanent evidence while detaching the summary."""
+
+        self.add_service("identity")
+        self.add_policy()
+        self.add_retention_policy()
+        deployment_id = self.add_deployment("identity", 80, artifact_hex="9")
+        issue_id = uuid7(81)
+        occurrence_id = uuid7(82)
+        reference_id = uuid7(83)
+        self.add_issue(issue_id, "identity", fingerprint="8" * 64)
+        self.db.execute(
+            """
+            INSERT INTO issue_occurrences(
+                occurrence_id, issue_id, service_name, deployment_id, occurred_at,
+                observed_at, summary, retention_policy_id,
+                retention_policy_revision, purge_after
+            ) VALUES (?, ?, 'identity', ?, ?, ?, 'timeout', 'standard', 1, ?)
+            """,
+            (occurrence_id, issue_id, deployment_id, NOW, NOW, LATER),
+        )
+        self.db.execute(
+            """
+            INSERT INTO telemetry_backends(
+                backend_name, capabilities_json, query_adapter, ui_url_template,
+                retention_class, auth_reference, created_at, updated_at
+            ) VALUES ('grafana', '["trace"]', 'grafana', 'https://example.invalid/{id}',
+                      '30d', 'GRAFANA_TOKEN', ?, ?)
+            """,
+            (NOW, NOW),
+        )
+        self.db.execute(
+            """
+            INSERT INTO telemetry_references(
+                telemetry_reference_id, kind, backend_name, locator_json,
+                service_name, deployment_id, created_at
+            ) VALUES (?, 'trace', 'grafana', '{"trace_id":"abc"}',
+                      'identity', ?, ?)
+            """,
+            (reference_id, deployment_id, NOW),
+        )
+        self.db.execute(
+            """
+            INSERT INTO issue_telemetry_references(
+                issue_id, telemetry_reference_id, occurrence_id, linked_at
+            ) VALUES (?, ?, ?, ?)
+            """,
+            (issue_id, reference_id, occurrence_id, NOW),
+        )
+
+        self.db.execute("DELETE FROM issue_occurrences WHERE occurrence_id=?", (occurrence_id,))
+
+        link = self.db.execute(
+            """
+            SELECT issue_id, telemetry_reference_id, occurrence_id
+            FROM issue_telemetry_references
+            WHERE issue_id=? AND telemetry_reference_id=?
+            """,
+            (issue_id, reference_id),
+        ).fetchone()
+        self.assertIsNotNone(link)
+        self.assertIsNone(link["occurrence_id"])
+        self.assertEqual(
+            self.db.execute(
+                "SELECT COUNT(*) FROM telemetry_references WHERE telemetry_reference_id=?",
+                (reference_id,),
+            ).fetchone()[0],
+            1,
+        )
+
+
 class IdempotencyAndTransactionTests(SchemaTestCase):
     """验证重复投递所有权门控和批事务回滚。 / Validate duplicate-delivery ownership gates and batch rollback."""
 
     def setUp(self) -> None:
-        """创建เอียด一个可接受 Diagnostic 的领域基础。 / Create the domain prerequisites for an accepted Diagnostic."""
+        """创建可接受 Diagnostic 的领域基础。 / Create the domain prerequisites for an accepted Diagnostic."""
 
         super().setUp()
         self.add_service("identity")
