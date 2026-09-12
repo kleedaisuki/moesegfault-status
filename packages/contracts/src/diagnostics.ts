@@ -230,6 +230,16 @@ export const DiagnosticFingerprintSchema = z
   );
 export type DiagnosticFingerprint = z.infer<typeof DiagnosticFingerprintSchema>;
 
+/**
+ * Diagnostic 条件信号 / Diagnostic condition signal.
+ *
+ * `recovery` 是检测器主动提交的正向证据，不会由缺少 `fault` 事件推断。
+ * `recovery` is positive evidence submitted by the detector; it is never inferred
+ * from the absence of `fault` events.
+ */
+export const DiagnosticSignalSchema = z.enum(["fault", "recovery"]);
+export type DiagnosticSignal = z.infer<typeof DiagnosticSignalSchema>;
+
 /** Diagnostic ingress 请求（最大传输体积仍由 HTTP 层强制 64 KiB）/ Diagnostic ingress request; HTTP enforces the 64 KiB body limit. */
 export const DiagnosticEventSchema = z
   .strictObject({
@@ -240,6 +250,10 @@ export const DiagnosticEventSchema = z
       .min(3)
       .max(128)
       .regex(/^[a-z][a-z0-9]*(?:\.[a-z][a-z0-9_]*)+$/),
+    /** 省略时保持旧生产者的故障语义。 / Omission preserves legacy producer fault semantics. */
+    signal: DiagnosticSignalSchema.default("fault"),
+    /** 恢复证据必须因果引用它要清除的最新故障事件。 / Recovery evidence causally references the latest fault event it clears. */
+    recovery_of_event_id: UuidV7Schema.optional(),
     severity: DiagnosticSeveritySchema,
     service_name: ServiceNameSchema,
     environment: EnvironmentSchema,
@@ -255,6 +269,17 @@ export const DiagnosticEventSchema = z
     attributes: DiagnosticAttributesSchema.default({}),
   })
   .superRefine((value, context) => {
+    if (
+      (value.signal === "recovery") !==
+      (value.recovery_of_event_id !== undefined)
+    ) {
+      context.addIssue({
+        code: "custom",
+        path: ["recovery_of_event_id"],
+        message:
+          "recovery_of_event_id is required exactly when signal is recovery",
+      });
+    }
     if (value.span_id !== undefined && value.trace_id === undefined) {
       context.addIssue({
         code: "custom",

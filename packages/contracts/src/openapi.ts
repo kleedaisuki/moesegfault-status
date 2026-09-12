@@ -211,8 +211,30 @@ export function buildOpenApiDocument(): Record<string, unknown> {
       const converted = z.toJSONSchema(schema, {
         target: "draft-2020-12",
         unrepresentable: "throw",
+        ...(name === "DiagnosticEvent" ? { io: "input" as const } : {}),
       }) as Record<string, unknown>;
       delete converted.$schema;
+      // Zod refinement 不会自动导出；显式保留恢复因果字段的双向约束。 / Zod refinements are not exported automatically; preserve the recovery reference constraint explicitly.
+      if (name === "DiagnosticEvent") {
+        converted.allOf = [
+          {
+            if: {
+              properties: { signal: { const: "recovery" } },
+              required: ["signal"],
+            },
+            then: {
+              properties: { recovery_of_event_id: {} },
+              required: ["recovery_of_event_id"],
+            },
+            else: {
+              not: {
+                properties: { recovery_of_event_id: {} },
+                required: ["recovery_of_event_id"],
+              },
+            },
+          },
+        ];
+      }
       return [name, converted];
     }),
   );

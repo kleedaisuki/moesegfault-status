@@ -55,6 +55,34 @@ function diagnosticEvent() {
 }
 
 describe("platform primitives", () => {
+  it("requires a causal fault reference exactly for explicit recovery", () => {
+    const event = diagnosticEvent();
+    expect(DiagnosticEventSchema.parse(event).signal).toBe("fault");
+    expect(
+      DiagnosticEventSchema.safeParse({ ...event, signal: "recovery" }).success,
+    ).toBe(false);
+    expect(
+      DiagnosticEventSchema.safeParse({
+        ...event,
+        signal: "fault",
+        recovery_of_event_id: eventId,
+      }).success,
+    ).toBe(false);
+    expect(
+      DiagnosticEventSchema.safeParse({
+        ...event,
+        signal: "recovery",
+        recovery_of_event_id: eventId,
+      }).success,
+    ).toBe(true);
+    expect(
+      DiagnosticEventSchema.safeParse({
+        ...event,
+        signal: "recovery",
+        recovery_of_event_id: "not-an-event",
+      }).success,
+    ).toBe(false);
+  });
   it("accepts lowercase UUIDv7 and rejects other versions or uppercase", () => {
     expect(UuidV7Schema.safeParse(eventId).success).toBe(true);
     expect(

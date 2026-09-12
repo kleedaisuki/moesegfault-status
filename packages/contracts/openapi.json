@@ -2591,6 +2591,24 @@
             "maxLength": 128,
             "pattern": "^[a-z][a-z0-9]*(?:\\.[a-z][a-z0-9_]*)+$"
           },
+          "signal": {
+            "default": "fault",
+            "type": "string",
+            "enum": ["fault", "recovery"]
+          },
+          "recovery_of_event_id": {
+            "type": "string",
+            "allOf": [
+              {
+                "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+              },
+              {
+                "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+              }
+            ],
+            "format": "uuid",
+            "description": "RFC 9562 UUIDv7 in lowercase canonical form"
+          },
           "severity": {
             "type": "string",
             "enum": ["info", "warning", "error", "critical"]
@@ -3140,11 +3158,27 @@
           "occurred_at",
           "correlation_id",
           "summary",
-          "fingerprint",
-          "evidence",
-          "attributes"
+          "fingerprint"
         ],
-        "additionalProperties": false
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": { "signal": { "const": "recovery" } },
+              "required": ["signal"]
+            },
+            "then": {
+              "properties": { "recovery_of_event_id": {} },
+              "required": ["recovery_of_event_id"]
+            },
+            "else": {
+              "not": {
+                "properties": { "recovery_of_event_id": {} },
+                "required": ["recovery_of_event_id"]
+              }
+            }
+          }
+        ]
       },
       "DiagnosticAccepted": {
         "type": "object",
