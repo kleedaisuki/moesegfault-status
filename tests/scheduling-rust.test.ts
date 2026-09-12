@@ -99,6 +99,48 @@ beforeAll(async () => {
           },
         },
       },
+      ...(await Promise.all(
+        ["enabled", "invalid"].map(async (mode) => ({
+          config: {
+            type: "worker" as const,
+            name: mode,
+            compatibilityDate: "2026-09-12",
+            manifest: {
+              mainModule: "index.js",
+              modules: {
+                "index.js": {
+                  type: "esm" as const,
+                  contents: await readFile(
+                    "tests/scheduling-runtime/build/index.js",
+                    "utf8",
+                  ),
+                },
+                "index_bg.wasm": {
+                  type: "wasm" as const,
+                  contents: await readFile(
+                    "tests/scheduling-runtime/build/index_bg.wasm",
+                  ),
+                },
+              },
+            },
+            env: {
+              DB: { type: "d1" as const, id: "rust-scheduling-runtime" },
+              NOTIFICATIONS_ENABLED: {
+                type: "json" as const,
+                value: mode === "enabled" ? "true" : "invalid",
+              },
+              NOTIFICATION_WEBHOOK_URL: {
+                type: "json" as const,
+                value: "https://notifications.example/hook",
+              },
+              NOTIFICATION_AUTHORIZATION: {
+                type: "json" as const,
+                value: "Bearer fixture-only",
+              },
+            },
+          },
+        })),
+      )),
       {
         config: {
           type: "worker",
@@ -223,14 +265,14 @@ it("runs overlapping cron invocations with one authoritative checkpoint and pers
   ).results;
   expect(outbox).toHaveLength(1);
   expect(outbox[0]).toMatchObject({ state: "delivered", attempt_count: 1 });
-  // 未配置外部通知出口必须重试，而非虚假确认。 / Missing external notification delivery must retry rather than falsely acknowledge.
+  // 禁用外部通知不领取、不消耗重试，也不虚假确认。 / Disabled notifications are neither claimed, retried, nor falsely acknowledged.
   expect(
     (
       await sql(
         "SELECT state,attempt_count FROM outbox WHERE event_type='status.changed' AND aggregate_id='service:api'",
       )
     ).results[0],
-  ).toMatchObject({ state: "pending", attempt_count: 1 });
+  ).toMatchObject({ state: "pending", attempt_count: 0 });
 });
 
 /** 健康诊断夹具仍经生产严格验证和领域评估。 / Health fixture still passes production strict validation and domain evaluation. */
@@ -367,4 +409,48 @@ it("purges expired occurrence through the real retention path while preserving i
       )
     ).results,
   ).toEqual([{ occurrence_id: id(302) }]);
+});
+
+/** 关闭出口不损失事件；恢复配置后同一 D1 行可再次领取。 / Disabled sinks retain events; re-enabling claims the same D1 row. */
+it("retains external events without attempts and makes them claimable after enabling", async () => {
+  const before = (
+    await sql(
+      "SELECT outbox_id,state,attempt_count FROM outbox WHERE event_type='status.changed' AND aggregate_id='service:api'",
+    )
+  ).results[0];
+  expect(before).toMatchObject({ state: "pending", attempt_count: 0 });
+  const disabled = await mf.dispatchFetch(
+    "https://scheduler.test/claim-outbox",
+    { method: "POST" },
+  );
+  expect(disabled.status).toBe(200);
+  expect(await disabled.json()).not.toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({ outbox_id: before.outbox_id }),
+    ]),
+  );
+  const invalid = await (
+    await mf.getWorker("invalid")
+  ).fetch("https://scheduler.test/claim-outbox", { method: "POST" });
+  expect(invalid.status).toBe(500);
+  expect(
+    (
+      await sql(
+        "SELECT state,attempt_count FROM outbox WHERE outbox_id=?",
+        before.outbox_id as string,
+      )
+    ).results[0],
+  ).toMatchObject({ state: "pending", attempt_count: 0 });
+  const enabled = await (
+    await mf.getWorker("enabled")
+  ).fetch("https://scheduler.test/claim-outbox", { method: "POST" });
+  expect(enabled.status).toBe(200);
+  expect(await enabled.json()).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        outbox_id: before.outbox_id,
+        attempt_count: 1,
+      }),
+    ]),
+  );
 });

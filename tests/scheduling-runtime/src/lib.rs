@@ -21,6 +21,22 @@ pub async fn fetch(mut request: Request, env: Env, ctx: Context) -> Result<Respo
         scheduling::scheduled(env, ctx).await?;
         return Response::from_json(&json!({"completed":true}));
     }
+    if request.path() == "/claim-outbox" {
+        // 测试直接验证生产领取 SQL，配置仍由生产验证器解析。 / Exercise production claim SQL with production configuration validation.
+        let enabled = status_backend::notifications::delivery_enabled(&env)?;
+        let db = Database::new(env.d1("DB")?);
+        let events = SchedulerStore::new(&db)
+            .claim_outbox(
+                "2099-01-01T00:00:00.000Z",
+                "test-claim",
+                "2099-01-01T00:01:00.000Z",
+                500,
+                enabled,
+            )
+            .await
+            .map_err(|_| Error::RustError("claim_failed".into()))?;
+        return Response::from_json(&events);
+    }
     if request.path() == "/diagnostic-lease-race" {
         let input = request.json::<Value>().await?;
         let db = Database::new(env.d1("DB")?);

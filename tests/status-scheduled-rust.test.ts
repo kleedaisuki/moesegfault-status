@@ -55,6 +55,16 @@ beforeAll(async () => {
             value: name === "bootstrap" ? "true" : "false",
           },
           DB: { type: "d1" as const, id: "production-scheduled-smoke" },
+          // 启用合法目标，但故意不绑定 Queue，以验证领取后的真实失败重试。 / Enable a valid sink but omit Queue to exercise real post-claim failure retries.
+          NOTIFICATIONS_ENABLED: { type: "json" as const, value: "true" },
+          NOTIFICATION_WEBHOOK_URL: {
+            type: "json" as const,
+            value: "https://notifications.example/hook",
+          },
+          NOTIFICATION_AUTHORIZATION: {
+            type: "json" as const,
+            value: "Bearer fixture-only",
+          },
           // 故意不提供 ARTIFACTS，候选存在时真实 cleanup 将失败。 / Intentionally omit ARTIFACTS so real cleanup fails when a candidate exists.
         },
       },

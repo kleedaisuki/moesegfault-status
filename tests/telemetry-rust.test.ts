@@ -58,6 +58,7 @@ beforeAll(async () => {
                 DEPLOYMENT_ID: id,
                 GIT_COMMIT: "a".repeat(40),
                 ARTIFACT_DIGEST: `sha256:${"b".repeat(64)}`,
+                NOTIFICATIONS_ENABLED: "true",
                 NOTIFICATION_WEBHOOK_URL: "https://webhook.test/send",
                 NOTIFICATION_AUTHORIZATION: "Bearer test-only-credential",
                 NOTIFICATION_MAX_ATTEMPTS: "3",
@@ -160,6 +161,13 @@ it("fails closed when webhook authorization is missing", async () => {
   expect(
     await consume(notification(), 1, "NOTIFICATION_AUTHORIZATION"),
   ).toEqual([{ action: "retry", delay: 2 }]);
+  expect((await history()).length).toBe(before);
+});
+it("does not deliver or acknowledge when notifications are not explicitly enabled", async () => {
+  const before = (await history()).length;
+  expect(await consume(notification(), 1, "NOTIFICATIONS_ENABLED")).toEqual([
+    { action: "retry", delay: 2 },
+  ]);
   expect((await history()).length).toBe(before);
 });
 it("does not ack exhausted messages while the DLQ binding is unavailable", async () => {

@@ -4,6 +4,19 @@ use super::*;
 use serde_json::{json, Value};
 use wasm_bindgen::{JsCast, JsValue};
 
+/// 调度器在领取外部 outbox 前检查；关闭时保留 D1 pending，不伪造投递成功。
+/// Check before claiming external outbox rows; disabled delivery leaves D1 pending, never fabricates success.
+pub fn delivery_enabled(env: &worker::Env) -> worker::Result<bool> {
+    let mode = env.var("NOTIFICATIONS_ENABLED").ok().map(|v| v.to_string());
+    if !delivery_mode(mode.as_deref()).map_err(|e| worker::Error::RustError(e.into()))? {
+        return Ok(false);
+    }
+    let endpoint = env.secret("NOTIFICATION_WEBHOOK_URL")?.to_string();
+    let authorization = env.secret("NOTIFICATION_AUTHORIZATION")?.to_string();
+    validate_endpoint(&endpoint, &authorization).map_err(|e| worker::Error::RustError(e.into()))?;
+    Ok(true)
+}
+
 /// 原始官方消息 binding 保留 attempts；DLQ 接受之前绝不确认失败消息。
 /// Raw official message bindings retain attempts; never acknowledge failure before DLQ acceptance.
 pub async fn consume_raw(
@@ -12,6 +25,7 @@ pub async fn consume_raw(
     _ctx: worker::Context,
 ) -> worker::Result<()> {
     let telemetry = crate::telemetry::for_invocation(&env)?;
+    let enabled = delivery_enabled(&env);
     let endpoint = env
         .secret("NOTIFICATION_WEBHOOK_URL")
         .map(|s| s.to_string());
@@ -55,7 +69,9 @@ pub async fn consume_raw(
             .and_then(|value| serde_json::from_value::<Notification>(value).ok())
             .filter(|n| n.validate().is_ok());
         let result = match (&notification, &endpoint, &authorization) {
-            (Some(n), Ok(url), Ok(auth)) => deliver_traced(n, url, auth, telemetry.as_ref()).await,
+            (Some(n), Ok(url), Ok(auth)) if matches!(enabled, Ok(true)) => {
+                deliver_traced(n, url, auth, telemetry.as_ref()).await
+            }
             _ => Err(worker::Error::RustError(
                 "notification_configuration_or_schema_invalid".into(),
             )),
@@ -67,7 +83,9 @@ pub async fn consume_raw(
         }
         let problem = if notification.is_none() {
             "invalid-notification"
-        } else if endpoint.is_err() || authorization.is_err() {
+        } else if matches!(enabled, Ok(false)) {
+            "notification-delivery-disabled"
+        } else if enabled.is_err() || endpoint.is_err() || authorization.is_err() {
             "notification-configuration-unavailable"
         } else {
             "notification-delivery-failed"
@@ -152,6 +170,11 @@ fn disposition(message: &JsValue, method: &str, delay: Option<u32>) -> worker::R
 /// 定时 outbox 的 Queue 移交；仅 Queue 接受后调用者才能标记 delivered。
 /// Scheduled outbox handoff; callers may mark delivered only after Queue acceptance.
 pub async fn publish(env: &worker::Env, notification: &Notification) -> worker::Result<()> {
+    if !delivery_enabled(env)? {
+        return Err(worker::Error::RustError(
+            "notification_delivery_disabled".into(),
+        ));
+    }
     notification
         .validate()
         .map_err(|e| worker::Error::RustError(e.into()))?;

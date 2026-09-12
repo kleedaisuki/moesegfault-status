@@ -151,13 +151,14 @@ impl<'a> SchedulerStore<'a> {
         self.db.batch(&queries).await?;
         Ok(())
     }
-    /// 原子领取重试事件并递增尝试次数。 / Atomically lease retry events and increment attempts.
+    /// 原子领取可投递事件；禁用外部通知时保留其状态与重试预算。 / Atomically lease deliverable events; disabled notifications retain state and retry budget.
     pub async fn claim_outbox(
         &self,
         now: &str,
         owner: &str,
         lease_until: &str,
         limit: i64,
+        notifications_enabled: bool,
     ) -> Result<Vec<Value>, DatabaseError> {
         self.db
             .all(&Query::new(
@@ -167,6 +168,7 @@ impl<'a> SchedulerStore<'a> {
                     lease_until.into(),
                     now.into(),
                     now.into(),
+                    i64::from(notifications_enabled).into(),
                     limit.clamp(1, 500).into(),
                 ],
             ))
@@ -475,6 +477,7 @@ UPDATE outbox SET state = 'processing', attempt_count = attempt_count + 1,
 WHERE outbox_id IN (
   SELECT outbox_id FROM outbox
   WHERE ((state = 'pending' AND next_attempt_at <= ?) OR (state = 'processing' AND lease_expires_at <= ?))
+  AND (? = 1 OR event_type IN ('maintenance.started', 'maintenance.expired', 'override.expired', 'suppression.expired', 'status.reevaluation_requested'))
   ORDER BY next_attempt_at, created_at LIMIT ?
 )
 RETURNING outbox_id, aggregate_type, aggregate_id, event_type, schema_version, payload_json, attempt_count"#;

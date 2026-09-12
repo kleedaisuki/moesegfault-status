@@ -104,6 +104,16 @@ pub fn validate_endpoint(endpoint: &str, authorization: &str) -> Result<url::Url
     Ok(url)
 }
 
+/// 外部投递必须显式开启；缺省关闭，拼写错误不降级为成功。
+/// External delivery requires explicit opt-in; absent means disabled and typos fail closed.
+pub fn delivery_mode(value: Option<&str>) -> Result<bool, &'static str> {
+    match value {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        _ => Err("invalid_notification_mode"),
+    }
+}
+
 /// 有界指数退避。 / Bounded exponential backoff.
 pub fn retry_delay(attempt: u32) -> u32 {
     (1u32 << attempt.min(8)).min(300)
@@ -112,11 +122,20 @@ pub fn retry_delay(attempt: u32) -> u32 {
 #[cfg(target_arch = "wasm32")]
 mod platform;
 #[cfg(target_arch = "wasm32")]
-pub use platform::{consume_raw, publish};
+pub use platform::{consume_raw, delivery_enabled, publish};
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivery_requires_explicit_opt_in() {
+        assert_eq!(delivery_mode(None), Ok(false));
+        assert_eq!(delivery_mode(Some("false")), Ok(false));
+        assert_eq!(delivery_mode(Some("true")), Ok(true));
+        for invalid in ["", "TRUE", "1", "enabled", " true"] {
+            assert!(delivery_mode(Some(invalid)).is_err());
+        }
+    }
     #[test]
     fn rejects_unsafe_destinations() {
         for url in [

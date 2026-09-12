@@ -29,8 +29,8 @@
     "MACHINE_ISSUER": "https://status.moesegfault.dev",
     "MACHINE_AUDIENCE": "moesegfault-status",
     "MACHINE_JWKS_URL": "https://status.moesegfault.dev/.well-known/jwks.json",
-    "R2_ACCOUNT_ID": "07109e406d4e1ab7a0997dd399db6fd5",
-    "R2_BUCKET_NAME": "moesegfault-observability",
+    // 原生产物上传通过机器 JWT + 私有 R2 binding，不需要另一套 S3 凭据。
+    // Native artifact uploads use machine JWTs and the private R2 binding, without separate S3 credentials.
     // 空映射不产生区域证据；部署时绑定私有默认 fetch 执行器。 / An empty map produces no regional evidence; bind private default-fetch executors for deployment.
     "PROBE_REGIONAL_CONFIG": "{}",
     // 后端端点与凭据分离；空表明确禁用查询。 / Separate endpoints from credentials; an empty map disables queries.
@@ -38,19 +38,13 @@
     "DIAGNOSTIC_QUEUE_NAME": "moesegfault-status-diagnostics",
     "NOTIFICATION_QUEUE_NAME": "moesegfault-status-notifications",
     "NOTIFICATION_MAX_ATTEMPTS": "5",
+    // 尚未配置收件方；保留 D1 待发事件，不假装通知已发送。
+    // No recipient is configured; retain pending D1 events rather than pretending delivery succeeded.
+    "NOTIFICATIONS_ENABLED": "false",
   },
   // 缺少秘密时失败关闭；不得在文件中放入值。 / Fail closed without secrets; never put secret values in this file.
   "secrets": {
-    "required": [
-      "ADMIN_PASSWORD_RECORD",
-      "ADMIN_EMAIL",
-      "CURSOR_SIGNING_KEY",
-      "R2_ACCESS_KEY_ID",
-      "R2_SECRET_ACCESS_KEY",
-      "NOTIFICATION_WEBHOOK_URL",
-      "NOTIFICATION_AUTHORIZATION",
-      "TELEMETRY_AUTH_JSON",
-    ],
+    "required": ["ADMIN_PASSWORD_RECORD", "ADMIN_EMAIL", "CURSOR_SIGNING_KEY"],
   },
   "queues": {
     "producers": [
@@ -72,14 +66,6 @@
       },
     ],
     "consumers": [
-      {
-        "queue": "moesegfault-status-notifications",
-        "max_batch_size": 10,
-        "max_batch_timeout": 5,
-        // 首次尝试 + 4次重试 = 5次总尝试。 / Initial attempt plus 4 retries equals 5 total attempts.
-        "max_retries": 4,
-        "dead_letter_queue": "moesegfault-status-notifications-dlq",
-      },
       {
         "queue": "moesegfault-status-diagnostics",
         "max_batch_size": 10,

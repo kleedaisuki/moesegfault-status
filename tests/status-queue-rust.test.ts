@@ -79,6 +79,7 @@ beforeAll(async () => {
                 DEPLOYMENT_ID: id,
                 GIT_COMMIT: "a".repeat(40),
                 ARTIFACT_DIGEST: `sha256:${"b".repeat(64)}`,
+                NOTIFICATIONS_ENABLED: "true",
                 NOTIFICATION_WEBHOOK_URL: "https://sink/send",
                 NOTIFICATION_AUTHORIZATION: "Bearer test-only",
                 NOTIFICATION_QUEUE_NAME: "real-notifications",

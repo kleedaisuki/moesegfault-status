@@ -54,6 +54,8 @@ async fn tick(
     owner: &str,
     end: i64,
 ) -> worker::Result<()> {
+    // 在领取前验证配置；关闭出口不消耗外部事件重试预算。 / Validate before claims; a disabled sink never spends external retry budgets.
+    let notifications_enabled = crate::notifications::delivery_enabled(env)?;
     let store = SchedulerStore::new(db);
     record_metrics(db, telemetry).await;
     store
@@ -125,6 +127,7 @@ async fn tick(
             owner,
             &iso(now_ms() + limits.lease)?,
             limits.outbox,
+            notifications_enabled,
         )
         .await
         .map_err(db_error)?;
