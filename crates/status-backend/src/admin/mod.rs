@@ -166,7 +166,7 @@ impl RpcProblem {
 
 /// 与现有 email schema 的 ASCII 邮箱形状一致，不使用邮箱进行授权。
 /// Match existing ASCII email schema shape; never use email for authorization.
-fn valid_email(value: &str) -> bool {
+pub(crate) fn valid_email(value: &str) -> bool {
     let Some((local, domain)) = value.split_once('@') else {
         return false;
     };

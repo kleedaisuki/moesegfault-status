@@ -12,7 +12,7 @@ import {
 } from "../../packages/contracts/src/public.js";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 
-const issuer = "https://rust-runtime.cloudflareaccess.com";
+const issuer = "https://rust-runtime.example";
 const audience = "a".repeat(64);
 const maintenanceClock = Date.parse("2026-09-12T08:00:00.123Z");
 let mf: Miniflare;
@@ -21,7 +21,6 @@ const privateKeys = new Map<string, KeyObject>();
 /** 用独立 Node 密码学实现生成真实签名。 / Produce real signatures using independent Node cryptography. */
 function token(
   changes: Record<string, unknown> = {},
-  access = false,
   alg = "RS256",
   kid = alg,
 ) {
@@ -29,7 +28,7 @@ function token(
   const claims = {
     iss: issuer,
     aud: audience,
-    sub: access ? "runtime-human" : "runtime-ci",
+    sub: "runtime-ci",
     iat: now,
     exp: now + 300,
     jti: "runtime-id",
@@ -38,9 +37,6 @@ function token(
     deployment_id: "0199d0a8-2e12-7a59-a51e-000000000001",
     scope: "diagnostics:write",
     nbf: now,
-    email: "human@example.com",
-    type: "app",
-    identity_nonce: "nonce",
     ...changes,
   };
   const input = [{ alg, kid }, claims]
@@ -108,7 +104,7 @@ beforeAll(async () => {
             modules: {
               "jwks.mjs": {
                 type: "esm",
-                contents: `let count=0; export default {fetch(r){const u=new URL(r.url);if(u.pathname==='/count')return Response.json({count});if(u.origin!==${JSON.stringify(issuer)}||!['/jwks','/cdn-cgi/access/certs'].includes(u.pathname))return new Response('denied',{status:403});count++;return Response.json({keys:${JSON.stringify(jwks)}});}}`,
+                contents: `let count=0; export default {fetch(r){const u=new URL(r.url);if(u.pathname==='/count')return Response.json({count});if(u.origin!==${JSON.stringify(issuer)}||u.pathname!=='/jwks')return new Response('denied',{status:403});count++;return Response.json({keys:${JSON.stringify(jwks)}});}}`,
               },
             },
           },
@@ -377,7 +373,7 @@ describe("Rust backend in actual workerd", () => {
     for (const alg of ["RS256", "ES256", "EdDSA", "RS256"]) {
       const response = await mf.dispatchFetch(
         "https://status.example/machine",
-        { headers: { authorization: `Bearer ${token({}, false, alg)}` } },
+        { headers: { authorization: `Bearer ${token({}, alg)}` } },
       );
       expect(response.status).toBe(200);
       expect(await response.json()).toEqual({ subject: "runtime-ci" });
@@ -390,7 +386,7 @@ describe("Rust backend in actual workerd", () => {
   it("does not refetch for an attacker-controlled unknown kid during cooldown", async () => {
     const response = await mf.dispatchFetch("https://status.example/machine", {
       headers: {
-        authorization: `Bearer ${token({}, false, "RS256", "unknown")}`,
+        authorization: `Bearer ${token({}, "RS256", "unknown")}`,
       },
     });
     expect(response.status).toBe(401);
@@ -414,17 +410,6 @@ describe("Rust backend in actual workerd", () => {
     expect(
       (await mf.dispatchFetch("https://status.example/machine")).status,
     ).toBe(401);
-  });
-  it("verifies Access and maps roles from trusted configuration", async () => {
-    const response = await mf.dispatchFetch("https://status.example/access", {
-      headers: { "cf-access-jwt-assertion": token({}, true) },
-    });
-    expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({
-      subject: "runtime-human",
-      roles: ["operator"],
-      access_application: audience,
-    });
   });
   it("reads bounded JSON through the Rust SDK stream", async () => {
     const options = {

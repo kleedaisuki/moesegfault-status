@@ -6,6 +6,7 @@
 
 pub mod access;
 pub mod admin;
+pub mod admin_auth;
 pub mod auth;
 pub mod bootstrap;
 pub mod cursor;

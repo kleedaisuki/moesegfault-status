@@ -25,6 +25,8 @@ extern "C" {
 enum Operation {
     /// 权威管理健康。 / Authoritative management health.
     Health,
+    /// 固定单管理员认证能力。 / Fixed single-administrator authentication capability.
+    Authentication(&'static str),
     /// 类型化目录读取。 / Typed catalog read.
     Read(ReadOperation),
     /// 诊断读取。 / Diagnostic read.
@@ -40,7 +42,7 @@ impl Operation {
         match self {
             Self::Health => "checkHealth",
             Self::Read(op) => op.name(),
-            Self::Diagnostic(op) | Self::Mutation(op) => op,
+            Self::Diagnostic(op) | Self::Mutation(op) | Self::Authentication(op) => op,
             Self::Evidence => "queryTelemetryReference",
         }
     }
@@ -139,6 +141,9 @@ async fn perform(env: &Env, operation: Operation, raw: Value) -> Value {
     };
     let db = Database::new(binding);
     match operation {
+        Operation::Authentication(op) => {
+            status_backend::admin_auth::dispatch(&db, op, raw, env).await
+        }
         Operation::Read(op) => admin::reads::read(&db, op, raw).await,
         Operation::Diagnostic(op) => admin::diagnostics::dispatch(&db, op, raw, env).await,
         Operation::Mutation(op) => admin::mutations::dispatch(&db, op, raw, env).await,
@@ -340,4 +345,22 @@ pub async fn register_backend(raw: JsValue) -> Result<JsValue, JsValue> {
 #[wasm_bindgen(js_name = setStatusOverride)]
 pub async fn set_status_override(raw: JsValue) -> Result<JsValue, JsValue> {
     invoke(Operation::Mutation("setStatusOverride"), raw).await
+}
+
+/// 单管理员私有认证，仅通过命名能力调用。 / Single-administrator authentication through the named private capability only.
+#[wasm_bindgen(js_name = loginAdministrator)]
+pub async fn login_administrator(raw: JsValue) -> Result<JsValue, JsValue> {
+    invoke(Operation::Authentication("loginAdministrator"), raw).await
+}
+
+/// 单管理员私有认证，仅通过命名能力调用。 / Single-administrator authentication through the named private capability only.
+#[wasm_bindgen(js_name = authenticateAdministrator)]
+pub async fn authenticate_administrator(raw: JsValue) -> Result<JsValue, JsValue> {
+    invoke(Operation::Authentication("authenticateAdministrator"), raw).await
+}
+
+/// 单管理员私有认证，仅通过命名能力调用。 / Single-administrator authentication through the named private capability only.
+#[wasm_bindgen(js_name = logoutAdministrator)]
+pub async fn logout_administrator(raw: JsValue) -> Result<JsValue, JsValue> {
+    invoke(Operation::Authentication("logoutAdministrator"), raw).await
 }

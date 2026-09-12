@@ -10,6 +10,10 @@ use status_backend::{
 use wasm_bindgen::prelude::*;
 use worker::{Context, Env, Request, Response};
 
+/// 仅嵌入可公开的机器签名公钥；私钥只存在于部署凭据库。
+/// Embed only public machine verification keys; private keys live exclusively in deployment secret storage.
+const MACHINE_JWKS: &str = include_str!("../../../config/machine-jwks.json");
+
 /// 安全边界错误不回传 SQL、平台异常或配置。 / Boundary errors never disclose SQL, platform exceptions, or configuration.
 fn problem(status: u16, code: &str, correlation: &str) -> worker::Result<Response> {
     let mut response = Response::from_json(&json!({
@@ -38,6 +42,21 @@ fn bootstrap_mode(env: &Env) -> bool {
 /// Public requests accept no forwarded administrator identity and expose no generic RPC HTTP tunnel.
 #[worker::event(fetch)]
 pub async fn fetch(request: Request, env: Env, ctx: Context) -> worker::Result<Response> {
+    // 初始发布也需要验证机器签名；公钥端点不授予任何管理或写入能力。
+    // Bootstrap must verify machine signatures too; public keys confer no administrative or write capability.
+    if request.method() == worker::Method::Get && request.path() == "/.well-known/jwks.json" {
+        let mut response = Response::ok(MACHINE_JWKS)?;
+        response
+            .headers_mut()
+            .set("content-type", "application/jwk-set+json")?;
+        response
+            .headers_mut()
+            .set("cache-control", "public, max-age=300")?;
+        response
+            .headers_mut()
+            .set("x-content-type-options", "nosniff")?;
+        return Ok(response);
+    }
     let correlation = correlation_id(&request)?;
     let started = telemetry::now_ms();
     if !bootstrap::allows(&request, &env) {

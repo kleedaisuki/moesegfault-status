@@ -1,11 +1,7 @@
 //! Workers 平台边界；没有公开 HTTP RPC 回退。
 //! Workers platform boundary; no public HTTP RPC fallback.
 use super::{configured_origin, expected_revision, resolve, RpcMethod, CONFIG};
-use crate::{
-    access::AccessTrust,
-    auth::cloudflare::authenticate_access,
-    http::{read_json, HttpError},
-};
+use crate::http::{read_json, HttpError};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use wasm_bindgen::{JsCast, JsValue};
@@ -170,13 +166,6 @@ async fn dispatch(
     trace_context: &crate::telemetry::TraceContext,
 ) -> Result<Response, HttpError> {
     let origin = configured_origin(&variable(env, "OPS_ORIGIN")?)?;
-    let trust = AccessTrust::new(
-        &variable(env, "ACCESS_ISSUER")?,
-        &variable(env, "ACCESS_AUDIENCE")?,
-        &variable(env, "ACCESS_MAX_TOKEN_AGE_SECONDS")?,
-        &variable(env, "ACCESS_ROLE_MAPPING")?,
-    )
-    .map_err(|_| CONFIG)?;
     let url = request.url().map_err(|_| COMMAND)?;
     if !url.path().starts_with("/api/") || url.origin().ascii_serialization() != origin {
         return Err(HttpError::new(
@@ -185,15 +174,6 @@ async fn dispatch(
             "Administrative API route not found",
         ));
     }
-    let denied = HttpError::new(
-        401,
-        "access-denied",
-        "A valid Cloudflare Access session is required",
-    );
-    let token = header(request, "cf-access-jwt-assertion")?.ok_or_else(|| denied.clone())?;
-    let principal = authenticate_access(&token, &trust)
-        .await
-        .map_err(|_| denied)?;
     if url.query().is_some() {
         return Err(HttpError::new(
             400,
@@ -201,14 +181,12 @@ async fn dispatch(
             "Query parameters are not accepted",
         ));
     }
-    let route = resolve(request.method().as_ref(), url.path())?;
-    if !principal.has_role(route.role) {
-        return Err(HttpError::new(
-            403,
-            "insufficient-role",
-            "Administrative role is insufficient",
-        ));
+    let client = AdminRpcClient::new(env)?;
+    if url.path().starts_with("/api/auth/") {
+        return authentication(request, &client, &origin, correlation).await;
     }
+    let route = resolve(request.method().as_ref(), url.path())?;
+    let principal = authenticate(request, &client, correlation).await?;
     if route.method == RpcMethod::Session {
         return response(&json!({"data":principal}), 200, false, correlation).map_err(|_| RPC);
     }
@@ -244,7 +222,6 @@ async fn dispatch(
         input["expected_revision"] =
             json!(expected_revision(header(request, "if-match")?.as_deref())?);
     }
-    let client = AdminRpcClient::new(env)?;
     let method = route.method;
     let result = crate::telemetry::with_span(
         "gateway.private_rpc",
@@ -287,6 +264,202 @@ async fn dispatch(
             response(&json!(p), p.status, true, correlation).map_err(|_| RPC)
         }
     }
+}
+
+/// 不透明会话 cookie；拒绝重复值以消除解析器分歧。 / Opaque session cookie; reject duplicates to eliminate parser disagreement.
+fn session_token(request: &Request) -> Result<String, HttpError> {
+    let cookies = header(request, "cookie")?.ok_or(DENIED)?;
+    if cookies.len() > 8192 {
+        return Err(DENIED);
+    }
+    let mut found = None;
+    for pair in cookies.split(';') {
+        let Some((name, value)) = pair.trim().split_once('=') else {
+            continue;
+        };
+        if name != "__Host-moe_session" {
+            continue;
+        }
+        if found.is_some() || !valid_token(value) {
+            return Err(DENIED);
+        }
+        found = Some(value.to_owned());
+    }
+    found.ok_or(DENIED)
+}
+/// 固定会话拒绝，不区分密码、账户或失效原因。 / Uniform denial does not distinguish password, account or expiry causes.
+const DENIED: HttpError = HttpError::new(
+    401,
+    "authentication-required",
+    "Administrator authentication is required",
+);
+/// 256 位随机值的无填充 base64url 编码。 / Unpadded base64url encoding of a 256-bit random value.
+fn valid_token(value: &str) -> bool {
+    value.len() == 43
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+/// 可信身份形状；浏览器不提供任何身份字段。 / Trusted principal shape; the browser supplies no identity fields.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct Principal {
+    /// 唯一主体。 / Sole subject.
+    subject: String,
+    /// 管理员联系地址。 / Administrator contact address.
+    email: crate::wire::Text<1, 320>,
+    /// 固定管理员权限。 / Fixed administrator permission.
+    roles: Vec<String>,
+    /// 原始登录时间。 / Original login timestamp.
+    authenticated_at: crate::wire::UtcTime,
+    /// 会话认证机制。 / Session authentication mechanism.
+    access_application: String,
+}
+/// 精确认证响应。 / Exact authentication response.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Authentication {
+    /// 仅接受服务端身份。 / Accept only service-produced identity.
+    principal: Principal,
+}
+/// 精确登录响应，token 只能进入 Cookie。 / Exact login response; token may only enter a cookie.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Login {
+    /// 敏感会话凭据。 / Sensitive session credential.
+    session_token: String,
+    /// 服务端绝对到期时间。 / Server absolute expiry.
+    expires_at: crate::wire::UtcTime,
+    /// 服务端身份。 / Server identity.
+    principal: Principal,
+}
+/// 校验固定单管理员能力。 / Validate the fixed single-administrator capability.
+fn principal(value: Principal) -> Result<Principal, HttpError> {
+    if value.subject != "single-admin"
+        || value.roles != ["admin"]
+        || value.access_application != "single-admin-password"
+    {
+        return Err(INVALID_RPC);
+    }
+    Ok(value)
+}
+/// 验证安全 RPC 错误，不反射任意正文。 / Validate a safe RPC problem without reflecting arbitrary bodies.
+fn auth_data(result: RpcResult, correlation: &str) -> Result<Value, HttpError> {
+    match result {
+        RpcResult::Data(data) => Ok(data.data),
+        RpcResult::Problem(result) => {
+            let p = result.problem;
+            if p.correlation_id != correlation
+                || !(400..=599).contains(&p.status)
+                || p.title.is_empty()
+                || p.title.len() > 512
+                || p.kind.len() > 2048
+                || url::Url::parse(&p.kind).is_err()
+                || p.detail.as_ref().is_some_and(|d| d.len() > 4096)
+            {
+                return Err(INVALID_RPC);
+            }
+            match p.status {
+                401 | 403 => Err(DENIED),
+                429 => Err(HttpError::new(
+                    429,
+                    "authentication-rate-limited",
+                    "Too many authentication attempts; try again later",
+                )),
+                400 => Err(COMMAND),
+                _ => Err(RPC),
+            }
+        }
+    }
+}
+/// 每次业务调用都重新验证会话，不缓存撤销状态。 / Revalidate each business request; never cache revocation state.
+async fn authenticate(
+    request: &Request,
+    client: &AdminRpcClient,
+    correlation: &str,
+) -> Result<Principal, HttpError> {
+    let input = json!({"session_token":session_token(request)?,"correlation_id":correlation});
+    let data = auth_data(
+        client
+            .call(RpcMethod::AuthenticateAdministrator, &input)
+            .await?,
+        correlation,
+    )?;
+    let data: Authentication = serde_json::from_value(data).map_err(|_| INVALID_RPC)?;
+    principal(data.principal)
+}
+/// 两个固定表单端点，共享同源、正文限制和严格字段集合。 / Two fixed form endpoints share origin, body limits and exact field sets.
+async fn authentication(
+    request: &mut Request,
+    client: &AdminRpcClient,
+    origin: &str,
+    correlation: &str,
+) -> Result<Response, HttpError> {
+    let path = request.url().map_err(|_| COMMAND)?.path().to_owned();
+    let (method, fields) = match path.as_str() {
+        "/api/auth/login" => (RpcMethod::LoginAdministrator, &["password"][..]),
+        "/api/auth/logout" => (RpcMethod::LogoutAdministrator, &[][..]),
+        _ => {
+            return Err(HttpError::new(
+                404,
+                "route-not-found",
+                "Administrative API route not found",
+            ))
+        }
+    };
+    if request.method() != worker::Method::Post {
+        return Err(HttpError::new(
+            405,
+            "method-not-allowed",
+            "Method not allowed",
+        ));
+    }
+    mutation_guards(request, origin)?;
+    let mut input: Value = read_json(request, 8192).await?;
+    let object = input.as_object().ok_or(COMMAND)?;
+    if object.len() != fields.len()
+        || fields
+            .iter()
+            .any(|field| !object.get(*field).is_some_and(Value::is_string))
+    {
+        return Err(COMMAND);
+    }
+    input["correlation_id"] = json!(correlation);
+    if method == RpcMethod::LogoutAdministrator {
+        input["session_token"] = json!(session_token(request)?);
+    }
+    let data = auth_data(client.call(method, &input).await?, correlation)?;
+    let mut cookie = None;
+    let body = if method == RpcMethod::LoginAdministrator {
+        let data: Login = serde_json::from_value(data).map_err(|_| INVALID_RPC)?;
+        if !valid_token(&data.session_token) {
+            return Err(INVALID_RPC);
+        }
+        let identity = principal(data.principal)?;
+        cookie = Some(format!(
+            "__Host-moe_session={}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200",
+            data.session_token
+        ));
+        json!({"data":{"principal":identity,"expires_at":data.expires_at}})
+    } else {
+        if data != json!({"ok":true}) {
+            return Err(INVALID_RPC);
+        }
+        if method == RpcMethod::LogoutAdministrator {
+            cookie = Some(
+                "__Host-moe_session=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0".into(),
+            );
+        }
+        json!({"data":{"ok":true}})
+    };
+    let mut result = response(&body, 200, false, correlation).map_err(|_| RPC)?;
+    if let Some(cookie) = cookie {
+        result
+            .headers_mut()
+            .set("set-cookie", &cookie)
+            .map_err(|_| RPC)?;
+    }
+    Ok(result)
 }
 
 /// 同源与非简单请求头双重防护，不提供 CORS 许可。 / Same-origin plus non-simple-header protection, with no CORS permission.

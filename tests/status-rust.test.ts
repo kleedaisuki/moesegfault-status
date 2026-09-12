@@ -5,7 +5,7 @@ import { execFileSync } from "node:child_process";
 
 /** 测试最终发布模块字节，不重建组合器或使用带测试路由的 driver。 / Test final release module bytes without reconstructing a compositor or using a test-route driver. */
 let runtime: Miniflare;
-/** 完整八次迁移，避免用不完整假 schema 隐藏执行错误。 / All eight migrations avoid hiding execution errors behind a fake schema. */
+/** 完整迁移集合，避免用不完整假 schema 隐藏执行错误。 / The complete migration set avoids hiding execution errors behind a fake schema. */
 beforeAll(async () => {
   const modules: Record<
     string,
@@ -75,6 +75,31 @@ beforeAll(async () => {
 }, 60_000);
 afterAll(async () => {
   await runtime?.dispose();
+});
+
+it("publishes only public signing keys even during bootstrap", async () => {
+  const expected = JSON.parse(
+    await readFile("config/machine-jwks.json", "utf8"),
+  );
+  for (const name of ["status", "bootstrap"]) {
+    const worker = await runtime.getWorker(name);
+    const response = await worker.fetch(
+      "https://status.test/.well-known/jwks.json",
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toBe(
+      "application/jwk-set+json",
+    );
+    const keys = (await response.json()) as { keys: Record<string, unknown>[] };
+    expect(keys).toEqual(expected);
+    for (const key of keys.keys) {
+      expect(key.alg).toBe("RS256");
+      expect(key.use).toBe("sig");
+      for (const privateField of ["d", "p", "q", "dp", "dq", "qi", "k"]) {
+        expect(key).not.toHaveProperty(privateField);
+      }
+    }
+  }
 });
 
 it("executes public Rust reads and refuses forged public correlation identities", async () => {

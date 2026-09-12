@@ -5,6 +5,12 @@ use crate::{access::AdminRole, http::HttpError};
 pub enum RpcMethod {
     /// 私有能力。 / Private Session capability.
     Session,
+    /// 密码登录。 / Password login.
+    LoginAdministrator,
+    /// 验证不透明会话。 / Authenticate an opaque session.
+    AuthenticateAdministrator,
+    /// 撤销会话。 / Revoke session.
+    LogoutAdministrator,
     /// 私有能力。 / Private checkHealth capability.
     CheckHealth,
     /// 私有能力。 / Private getIncident capability.
@@ -65,6 +71,9 @@ impl RpcMethod {
     pub fn name(self) -> &'static str {
         match self {
             Self::Session => "Session",
+            Self::LoginAdministrator => "loginAdministrator",
+            Self::AuthenticateAdministrator => "authenticateAdministrator",
+            Self::LogoutAdministrator => "logoutAdministrator",
             Self::CheckHealth => "checkHealth",
             Self::GetIncident => "getIncident",
             Self::QueryTelemetryReference => "queryTelemetryReference",

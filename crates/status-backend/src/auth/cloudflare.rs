@@ -2,10 +2,7 @@
 //! Pinned JWKS fetch and public-key cache using the Workers Rust SDK.
 
 use super::{bearer, verify_machine, MachineIdentity, MachineTrust, PublicKeys, INVALID_TOKEN};
-use crate::{
-    access::{verify_access, AccessTrust, AdminPrincipal},
-    http::{read_json_stream, HttpError},
-};
+use crate::http::{read_json_stream, HttpError};
 use futures_util::{
     future::{select, Either},
     pin_mut,
@@ -48,16 +45,6 @@ pub async fn authenticate_machine(
     )
     .await?;
     verify_machine(token, trust, &keys, Date::now().as_millis() as f64 / 1000.0)
-}
-
-/// 完整的人类 Access 认证，不读取伪造的邮箱或角色请求头。
-/// Complete human Access authentication, ignoring forged email or role headers.
-pub async fn authenticate_access(
-    token: &str,
-    trust: &AccessTrust,
-) -> Result<AdminPrincipal, HttpError> {
-    let keys = remote_keys(&trust.jwks_url(), token, &[Algorithm::RS256]).await?;
-    verify_access(token, trust, &keys, (Date::now().as_millis() / 1000) as i64)
 }
 
 /// 缓存十分钟，未知 kid 最多每三十秒重新下载一次。

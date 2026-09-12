@@ -2,11 +2,7 @@
 #![cfg(target_arch = "wasm32")]
 
 use status_backend::{
-    access::AccessTrust,
-    auth::{
-        cloudflare::{authenticate_access, authenticate_machine},
-        MachineTrust,
-    },
+    auth::{cloudflare::authenticate_machine, MachineTrust},
     http::read_json,
 };
 use worker::*;
@@ -48,23 +44,6 @@ pub async fn fetch(mut request: Request, env: Env, _ctx: Context) -> Result<Resp
     if request.path() == "/json" {
         return match read_json::<serde_json::Value>(&mut request, 16).await {
             Ok(value) => Response::from_json(&value),
-            Err(error) => Response::error(error.code, error.status),
-        };
-    }
-    if request.path() == "/access" {
-        let trust = AccessTrust::new(
-            &issuer,
-            &audience,
-            "3600",
-            r#"{"runtime-human":["operator"]}"#,
-        )
-        .map_err(|e| Error::RustError(e.to_string()))?;
-        let token = request
-            .headers()
-            .get("cf-access-jwt-assertion")?
-            .unwrap_or_default();
-        return match authenticate_access(&token, &trust).await {
-            Ok(principal) => Response::from_json(&principal),
             Err(error) => Response::error(error.code, error.status),
         };
     }

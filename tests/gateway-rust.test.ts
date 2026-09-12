@@ -1,38 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
 import { readFile } from "node:fs/promises";
-import { generateKeyPairSync, sign } from "node:crypto";
-
-/** 真实签名与 workerd RPC，mock 仅隔离领域服务。 / Real signatures and workerd RPC; mock isolates only domain services. */
-const pair = generateKeyPairSync("rsa", { modulusLength: 2048 });
-const issuer = "https://gateway-tests.cloudflareaccess.com";
-const audience = "a".repeat(64);
+/** 不透明cookie仅在真实named RPC中校验。 / Opaque cookies are validated through real named RPC. */
+const session = "a".repeat(43);
 let mf: Miniflare;
-/** 独立 Node 密码学生成 Access assertion。 / Independent Node cryptography generates Access assertions. */
-function token(subject = "admin") {
-  const now = Math.floor(Date.now() / 1000);
-  const input = [
-    { alg: "RS256", kid: "test" },
-    {
-      iss: issuer,
-      aud: [audience],
-      sub: subject,
-      email: "human@example.com",
-      type: "app",
-      identity_nonce: "nonce",
-      iat: now,
-      nbf: now,
-      exp: now + 300,
-    },
-  ]
-    .map((v) => Buffer.from(JSON.stringify(v)).toString("base64url"))
-    .join(".");
-  return `${input}.${sign("sha256", Buffer.from(input), pair.privateKey).toString("base64url")}`;
-}
 /** 同源 JSON 请求默认值。 / Same-origin JSON request defaults. */
-function headers(subject = "admin") {
+function headers() {
   return {
-    "cf-access-jwt-assertion": token(subject),
+    cookie: `__Host-moe_session=${session}`,
     origin: "https://ops.example",
     "content-type": "application/json",
     "x-moesegfault-csrf": "1",
@@ -69,7 +44,13 @@ const methods = [
   "setStatusOverride",
 ];
 beforeAll(async () => {
-  const mock = `import {WorkerEntrypoint} from 'cloudflare:workers'; export class AdminRpc extends WorkerEntrypoint { ${methods.map((m) => `${m}(request){if(request.incident_id === "bad-extra")return {data:{},unexpected:true}; if(request.incident_id === "bad-envelope")return {data:{},problem:{}}; if(request.incident_id === "wrong-correlation")return {problem:{type:"https://status.example/problem",title:"Rejected",status:409,correlation_id:"spoofed"}}; if(request.incident_id === "unavailable")throw Error("secret internal failure"); return {data:{method:${JSON.stringify(m)},request,revision:2}}}`).join("\n")} } export default {fetch(){return new Response('Not found',{status:404})}};`;
+  const mock = `import {WorkerEntrypoint} from 'cloudflare:workers'; export class AdminRpc extends WorkerEntrypoint {
+    authenticateAdministrator(request){if(request.session_token === "b".repeat(43))return {data:{principal:{...this.identity(),subject:"spoofed"}}}; return request.session_token === ${JSON.stringify(session)} ? {data:{principal:this.identity()}} : this.denied(request)}
+    identity(){return {subject:'single-admin',email:'admin@example.com',roles:['admin'],authenticated_at:'2026-09-12T00:00:00Z',access_application:'single-admin-password'}}
+    denied(request){return {problem:{type:'https://status.example/problem',title:'Denied',status:401,correlation_id:request.correlation_id}}}
+    loginAdministrator(request){return request.password === 'test-password' ? {data:{session_token:${JSON.stringify(session)},expires_at:'2026-09-13T00:00:00Z',principal:this.identity()}} : this.denied(request)}
+    logoutAdministrator(request){return request.session_token === ${JSON.stringify(session)} ? {data:{ok:true}} : this.denied(request)}
+    ${methods.map((m) => `${m}(request){if(request.incident_id === "bad-extra")return {data:{},unexpected:true}; if(request.incident_id === "bad-envelope")return {data:{},problem:{}}; if(request.incident_id === "wrong-correlation")return {problem:{type:"https://status.example/problem",title:"Rejected",status:409,correlation_id:"spoofed"}}; if(request.incident_id === "unavailable")throw Error("secret internal failure"); return {data:{method:${JSON.stringify(m)},request,revision:2}}}`).join("\n")} } export default {fetch(){return new Response('Not found',{status:404})}};`;
   const module = (name: string, contents: string) => ({
     mainModule: name,
     modules: { [name]: { type: "esm" as const, contents } },
@@ -103,13 +84,6 @@ beforeAll(async () => {
             ...Object.fromEntries(
               Object.entries({
                 OPS_ORIGIN: "https://ops.example",
-                ACCESS_ISSUER: issuer,
-                ACCESS_AUDIENCE: audience,
-                ACCESS_MAX_TOKEN_AGE_SECONDS: "86400",
-                ACCESS_ROLE_MAPPING: JSON.stringify({
-                  admin: ["admin"],
-                  viewer: ["viewer"],
-                }),
                 ENVIRONMENT: "development",
               }).map(([key, value]) => [key, { type: "json", value }]),
             ),
@@ -120,7 +94,6 @@ beforeAll(async () => {
             },
           },
         },
-        dev: { outboundService: { type: "worker", worker: "jwks" } },
       },
       {
         config: {
@@ -130,17 +103,6 @@ beforeAll(async () => {
           manifest: module("status.js", mock),
         },
       },
-      {
-        config: {
-          type: "worker",
-          name: "jwks",
-          compatibilityDate: "2026-09-12",
-          manifest: module(
-            "jwks.js",
-            `export default {fetch(){return Response.json({keys:[${JSON.stringify({ ...pair.publicKey.export({ format: "jwk" }), alg: "RS256", kid: "test", use: "sig" })}]})}}`,
-          ),
-        },
-      },
     ],
   });
 }, 60_000);
@@ -148,11 +110,103 @@ afterAll(async () => {
   await mf?.dispose();
 });
 describe("Rust operations gateway on workerd", () => {
-  it("fails closed before dispatch without Access", async () => {
+  it("fails closed before dispatch without a session", async () => {
     const r = await mf.dispatchFetch("https://ops.example/api/health");
     expect(r.status).toBe(401);
     expect(r.headers.get("content-type")).toContain("application/problem+json");
     expect(r.headers.get("cache-control")).toBe("no-store");
+  });
+  it("ignores forged Access assertions and rejects malformed or duplicate session cookies", async () => {
+    for (const cookie of [
+      "",
+      "__Host-moe_session=bad",
+      `__Host-moe_session=${session}; __Host-moe_session=${session}`,
+    ]) {
+      const r = await mf.dispatchFetch("https://ops.example/api/session", {
+        headers: { cookie, "cf-access-jwt-assertion": "forged" },
+      });
+      expect(r.status).toBe(401);
+    }
+  });
+  it("rejects noncanonical trusted identity and revalidates each request", async () => {
+    const r = await mf.dispatchFetch("https://ops.example/api/session", {
+      headers: { cookie: `__Host-moe_session=${"b".repeat(43)}` },
+    });
+    expect(r.status).toBe(502);
+    const valid = await mf.dispatchFetch("https://ops.example/api/session", {
+      headers: headers(),
+    });
+    expect(valid.status).toBe(200);
+    const invalid = await mf.dispatchFetch("https://ops.example/api/session", {
+      headers: { cookie: `__Host-moe_session=${"c".repeat(43)}` },
+    });
+    expect(invalid.status).toBe(401);
+  });
+  it("logs in with a host-only secure HttpOnly cookie, never a JSON session token", async () => {
+    const r = await mf.dispatchFetch("https://ops.example/api/auth/login", {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({ password: "test-password" }),
+    });
+    expect(r.status).toBe(200);
+    const cookie = r.headers.get("set-cookie")!;
+    for (const part of [
+      `__Host-moe_session=${session}`,
+      "Secure",
+      "HttpOnly",
+      "SameSite=Strict",
+      "Path=/",
+      "Max-Age=43200",
+    ])
+      expect(cookie).toContain(part);
+    expect(cookie).not.toContain("Domain=");
+    const body = await r.text();
+    expect(body).not.toContain(session);
+    expect(body).not.toContain("session_token");
+    const logout = await mf.dispatchFetch(
+      "https://ops.example/api/auth/logout",
+      { method: "POST", headers: headers(), body: "{}" },
+    );
+    expect(logout.status).toBe(200);
+    expect(logout.headers.get("set-cookie")).toContain("Max-Age=0");
+  });
+  it("protects every auth POST with origin, CSRF, exact fields and 8KiB bounds", async () => {
+    for (const [changes, body, status] of [
+      [{ origin: "https://evil.example" }, { password: "test-password" }, 403],
+      [{ "x-moesegfault-csrf": "0" }, { password: "test-password" }, 403],
+      [{ "sec-fetch-site": "cross-site" }, { password: "test-password" }, 403],
+      [{ "content-type": "text/plain" }, { password: "test-password" }, 415],
+      [{}, { password: "test-password", principal: { roles: ["admin"] } }, 400],
+      [{}, { password: "wrong" }, 401],
+      [{}, { password: "a".repeat(8192) }, 413],
+    ] as const) {
+      const r = await mf.dispatchFetch("https://ops.example/api/auth/login", {
+        method: "POST",
+        headers: { ...headers(), ...changes },
+        body: JSON.stringify(body),
+      });
+      expect(r.status).toBe(status);
+      expect(await r.text()).not.toContain("test-password");
+    }
+    for (const path of ["setup", "password"])
+      expect(
+        (
+          await mf.dispatchFetch(`https://ops.example/api/auth/${path}`, {
+            method: "POST",
+            headers: headers(),
+            body: "{}",
+          })
+        ).status,
+      ).toBe(404);
+    expect(
+      (
+        await mf.dispatchFetch("https://ops.example/api/auth/login?x=1", {
+          method: "POST",
+          headers: headers(),
+          body: "{}",
+        })
+      ).status,
+    ).toBe(400);
   });
   it("uses named RPC and replaces browser identity and trace", async () => {
     const r = await mf.dispatchFetch("https://ops.example/api/health", {
@@ -165,7 +219,7 @@ describe("Rust operations gateway on workerd", () => {
     expect(r.status, await r.clone().text()).toBe(200);
     const body: any = await r.json();
     expect(body.data.method).toBe("checkHealth");
-    expect(body.data.request.principal.subject).toBe("admin");
+    expect(body.data.request.principal.subject).toBe("single-admin");
     expect(body.data.request.correlation_id).not.toBe("spoofed");
     expect(body.data.request.trace_context.traceparent).toBe(
       r.headers.get("traceparent"),
@@ -174,14 +228,13 @@ describe("Rust operations gateway on workerd", () => {
   });
   it("returns session without a business call", async () => {
     const r = await mf.dispatchFetch("https://ops.example/api/session", {
-      headers: headers("viewer"),
+      headers: headers(),
     });
     expect(r.status, await r.clone().text()).toBe(200);
-    expect(((await r.json()) as any).data.roles).toEqual(["viewer"]);
+    expect(((await r.json()) as any).data.roles).toEqual(["admin"]);
   });
-  it("enforces role, CSRF, origin, media, compression and hard byte limit", async () => {
-    for (const [changes, subject, body, status] of [
-      [{}, "viewer", "{}", 403],
+  it("enforces CSRF, origin, media, compression and hard byte limit", async () => {
+    for (const [changes, _subject, body, status] of [
       [{ origin: "https://evil.example" }, "admin", "{}", 403],
       [{ "x-moesegfault-csrf": "0" }, "admin", "{}", 403],
       [{ "sec-fetch-site": "cross-site" }, "admin", "{}", 403],
@@ -191,7 +244,7 @@ describe("Rust operations gateway on workerd", () => {
     ] as const) {
       const r = await mf.dispatchFetch("https://ops.example/api/incidents", {
         method: "POST",
-        headers: { ...headers(subject), ...changes },
+        headers: { ...headers(), ...changes },
         body,
       });
       expect(r.status).toBe(status);
