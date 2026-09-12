@@ -14,15 +14,20 @@ use worker::*;
 /// 此入口不部署到生产；不替代任何业务接口。 / Never deploy this entrypoint to production; it replaces no business API.
 #[event(fetch)]
 pub async fn fetch(mut request: Request, env: Env, _ctx: Context) -> Result<Response> {
-    if request.path().starts_with("/v1/incidents") {
+    if request.path().starts_with("/v1/") {
         let db = status_backend::database::Database::new(env.d1("DB")?);
         let context = status_backend::public::PublicContext {
             db: &db,
             cursor_secret: "runtime-cursor-secret",
             correlation_id: "0199d0a8-2e12-7a59-a51e-000000000099",
-            now: (Date::now().as_millis() / 1000) as i64,
+            // 仅测试时钟注入；此驱动不部署。 / Test-only clock injection; this driver is never deployed.
+            now_millis: request
+                .headers()
+                .get("x-runtime-now")?
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(Date::now().as_millis() as i64),
         };
-        return status_backend::public::handle_incidents(&request, &context)
+        return status_backend::public::handle_public(&request, &context)
             .await?
             .map_or_else(|| Response::error("Not found", 404), Ok);
     }

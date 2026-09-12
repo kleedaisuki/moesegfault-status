@@ -1,5 +1,6 @@
 //! Incident 查询、分页和公开证据聚合。 / Incident queries, pagination, and public evidence aggregation.
 
+use super::validation::{text, timestamp};
 use super::{self_link, single, PublicContext, INTERNAL, INVALID, NOT_FOUND};
 use crate::{
     cursor::{Binding, CursorSigner},
@@ -112,7 +113,7 @@ pub(super) async fn list(url: &Url, context: &PublicContext<'_>) -> Result<Value
             return Err(INVALID);
         }
         let key = signer
-            .verify(&cursor, &binding, context.now)
+            .verify(&cursor, &binding, context.now_seconds())
             .map_err(|_| INVALID)?;
         let started = key
             .get("started_at")
@@ -161,7 +162,7 @@ pub(super) async fn list(url: &Url, context: &PublicContext<'_>) -> Result<Value
                         .as_object()
                         .ok_or(INTERNAL)?
                         .clone(),
-                    context.now,
+                    context.now_seconds(),
                 )
                 .map_err(|_| INTERNAL)?,
         ),
@@ -292,36 +293,6 @@ fn validate_row(row: &IncidentRow) -> Result<(), HttpError> {
         return Err(INTERNAL);
     }
     Ok(())
-}
-
-/// 与 JavaScript 字符串契约一样使用 UTF-16 长度。 / Match JavaScript string contracts using UTF-16 length.
-fn text(value: &str, minimum: usize, maximum: usize) -> bool {
-    (minimum..=maximum).contains(&value.encode_utf16().count())
-}
-
-/// 严格 UTC RFC3339，最多纳秒精度，不接受闰秒或偏移。
-/// Strict UTC RFC3339, at most nanosecond precision, without leap seconds or offsets.
-fn timestamp(value: &str) -> bool {
-    if !value.is_ascii()
-        || !(20..=30).contains(&value.len())
-        || !value.ends_with('Z')
-        || value.as_bytes().get(10) != Some(&b'T')
-    {
-        return false;
-    }
-    if value.len() > 20
-        && (value.as_bytes()[19] != b'.'
-            || !(1..=9).contains(&(value.len() - 21))
-            || !value.as_bytes()[20..value.len() - 1]
-                .iter()
-                .all(u8::is_ascii_digit))
-    {
-        return false;
-    }
-    if &value[17..19] == "60" {
-        return false;
-    }
-    chrono::DateTime::parse_from_rfc3339(value).is_ok()
 }
 
 /// 公开投影不传播 cause 或私有查询列到列表。 / Public list projection does not propagate cause or private query columns.

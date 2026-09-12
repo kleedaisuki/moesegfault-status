@@ -1,6 +1,9 @@
 //! Rust 公共只读 API；响应仅投影公开字段。 / Rust public read-only API; project public fields only.
 
 mod incidents;
+mod maintenance;
+mod status;
+mod validation;
 
 use crate::{database::Database, http::HttpError};
 use serde::Serialize;
@@ -28,13 +31,20 @@ pub struct PublicContext<'a> {
     pub cursor_secret: &'a str,
     /// 可信调用关联 ID。 / Trusted invocation correlation ID.
     pub correlation_id: &'a str,
-    /// Unix 秒，供确定性分页测试注入。 / Unix seconds, injectable for deterministic pagination tests.
-    pub now: i64,
+    /// Unix 毫秒，保留查询边界精度。 / Unix milliseconds, preserving query boundary precision.
+    pub now_millis: i64,
 }
 
-/// 路由已迁移的 Incident 公开接口；其他路由返回 None，不能冒充健康响应。
-/// Route migrated public Incident endpoints; other paths return None, never a fabricated healthy response.
-pub async fn handle_incidents(
+impl PublicContext<'_> {
+    /// JWT/游标协议使用整秒，不影响查询时间精度。 / Cursor wire uses whole seconds without reducing query time precision.
+    fn now_seconds(&self) -> i64 {
+        self.now_millis.div_euclid(1000)
+    }
+}
+
+/// 路由已迁移的公开接口；其他路由返回 None，不能冒充健康响应。
+/// Route migrated public endpoints; other paths return None, never a fabricated healthy response.
+pub async fn handle_public(
     request: &Request,
     context: &PublicContext<'_>,
 ) -> worker::Result<Option<Response>> {
@@ -46,7 +56,20 @@ pub async fn handle_incidents(
         .path()
         .strip_prefix("/v1/incidents/")
         .filter(|p| !p.is_empty() && !p.contains('/'));
-    if url.path() != "/v1/incidents" && detail.is_none() {
+    let service = url
+        .path()
+        .strip_prefix("/v1/services/")
+        .filter(|p| !p.is_empty() && !p.contains('/'));
+    if ![
+        "/v1/incidents",
+        "/v1/maintenance-windows",
+        "/v1/status",
+        "/v1/services",
+    ]
+    .contains(&url.path())
+        && detail.is_none()
+        && service.is_none()
+    {
         return Ok(None);
     }
     let result = async {
@@ -54,6 +77,21 @@ pub async fn handle_incidents(
             return Err(INVALID);
         }
         crate::cursor::CursorSigner::new(context.cursor_secret).map_err(|_| INTERNAL)?;
+        if url.path() == "/v1/maintenance-windows" {
+            return maintenance::list(&url, context).await;
+        }
+        if url.path() == "/v1/status" {
+            return status::platform(&url, context).await;
+        }
+        if url.path() == "/v1/services" {
+            return status::list(&url, context).await;
+        }
+        if let Some(name) = service {
+            let name = percent_encoding::percent_decode_str(name)
+                .decode_utf8()
+                .map_err(|_| INVALID)?;
+            return status::detail(&name, &url, context).await;
+        }
         match detail {
             Some(id) => {
                 let id = percent_encoding::percent_decode_str(id)
@@ -105,6 +143,7 @@ fn json<T: Serialize>(body: &T, correlation: &str) -> worker::Result<Response> {
 fn problem(error: &HttpError, url: &Url, correlation: &str) -> worker::Result<Response> {
     let title = match error.status {
         400 => "Invalid request",
+        404 if url.path().starts_with("/v1/services/") => "Service not found",
         404 => "Incident not found",
         _ => "Internal server error",
     };

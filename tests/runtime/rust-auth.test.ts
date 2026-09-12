@@ -5,11 +5,16 @@ import { execFileSync } from "node:child_process";
 import {
   PublicIncidentListResponseSchema,
   PublicIncidentResponseSchema,
+  PublicMaintenanceWindowListResponseSchema,
+  PlatformStatusResponseSchema,
+  PublicServiceListResponseSchema,
+  PublicServiceStatusResponseSchema,
 } from "../../packages/contracts/src/public.js";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 
 const issuer = "https://rust-runtime.cloudflareaccess.com";
 const audience = "a".repeat(64);
+const maintenanceClock = Date.parse("2026-09-12T08:00:00.123Z");
 let mf: Miniflare;
 const privateKeys = new Map<string, KeyObject>();
 
@@ -118,6 +123,178 @@ afterAll(async () => {
 });
 
 describe("Rust backend in actual workerd", () => {
+  it("does not manufacture health from missing service evidence", async () => {
+    const response = await mf.dispatchFetch(
+      "https://status.example/v1/services/api",
+      { headers: { "x-runtime-now": String(maintenanceClock) } },
+    );
+    expect(response.status).toBe(200);
+    const body = PublicServiceStatusResponseSchema.parse(await response.json());
+    expect(body.data.direct_status).toBe("unknown");
+    expect(body.data.effective_impact).toBe("unknown");
+    expect(body.data.components.map((c) => c.id)).toEqual(["public-api"]);
+  });
+  it("recomputes cyclic dependency and support impact directly in Rust", async () => {
+    const db = await mf.getD1Database("DB", "rust");
+    const now = new Date(maintenanceClock).toISOString();
+    const later = new Date(maintenanceClock + 300_000).toISOString();
+    const dependencyDeadline = new Date(
+      maintenanceClock + 120_000,
+    ).toISOString();
+    await db
+      .prepare(
+        "INSERT INTO services(service_name,display_name,owner,criticality,created_at,updated_at) VALUES('upstream','Upstream','private-actor','critical',?,?)",
+      )
+      .bind(now, now)
+      .run();
+    for (const [kind, id, state, deadline] of [
+      ["service", "api", "operational", later],
+      ["service", "upstream", "major_outage", dependencyDeadline],
+      ["component", "public-api", "operational", later],
+    ]) {
+      await db
+        .prepare(
+          "INSERT INTO current_statuses(target_type,target_id,direct_status,effective_impact,evaluated_at,fresh_until) VALUES(?,?,?,'operational',?,?)",
+        )
+        .bind(kind, id, state, now, deadline)
+        .run();
+    }
+    await db
+      .prepare(
+        "INSERT INTO service_dependencies(source_service,target_service,capability,kind,criticality,created_at) VALUES('api','upstream','requests','required','critical',?),('upstream','api','reverse','required','critical',?)",
+      )
+      .bind(now, now)
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO component_services(component_id,service_name,role,created_at) VALUES('public-api','upstream','supporting',?)",
+      )
+      .bind(now)
+      .run();
+    const headers = { "x-runtime-now": String(maintenanceClock) };
+    const response = await mf.dispatchFetch(
+      "https://status.example/v1/services/api",
+      { headers },
+    );
+    const body = PublicServiceStatusResponseSchema.parse(await response.json());
+    expect(body.data.direct_status).toBe("operational");
+    expect(body.data.dependency_risk).toEqual({
+      status: "major_outage",
+      affected_capabilities: ["requests"],
+      dependency_count: 1,
+    });
+    expect(body.data.effective_impact).toBe("major_outage");
+    expect(body.data.fresh_until).toBe(dependencyDeadline);
+    expect(body.data.components[0].status).toBe("major_outage");
+    const platform = PlatformStatusResponseSchema.parse(
+      await (
+        await mf.dispatchFetch("https://status.example/v1/status", { headers })
+      ).json(),
+    );
+    expect(platform.data.status).toBe("major_outage");
+    expect(platform.data.active_incident_count).toBe(2);
+    const first = PublicServiceListResponseSchema.parse(
+      await (
+        await mf.dispatchFetch("https://status.example/v1/services?limit=1", {
+          headers,
+        })
+      ).json(),
+    );
+    expect(first.data[0].service_name).toBe("api");
+    const next = PublicServiceListResponseSchema.parse(
+      await (
+        await mf.dispatchFetch(
+          `https://status.example/v1/services?limit=1&cursor=${encodeURIComponent(first.page.next_cursor!)}`,
+          { headers },
+        )
+      ).json(),
+    );
+    expect(next.data[0].service_name).toBe("upstream");
+    expect(next.page.next_cursor).toBeNull();
+    const stale = PublicServiceStatusResponseSchema.parse(
+      await (
+        await mf.dispatchFetch("https://status.example/v1/services/api", {
+          headers: { "x-runtime-now": String(maintenanceClock + 400_000) },
+        })
+      ).json(),
+    );
+    expect(stale.data.direct_status).toBe("unknown");
+    expect(stale.data.effective_impact).toBe("major_outage");
+  });
+  it("preserves locale-sensitive public component ordering", async () => {
+    const db = await mf.getD1Database("DB", "rust");
+    const now = new Date(maintenanceClock).toISOString();
+    for (const id of ["component-B", "component-ä", "component-a"]) {
+      await db
+        .prepare(
+          "INSERT INTO components(component_id,service_name,display_name,created_at,updated_at) VALUES(?,'api',?,?,?)",
+        )
+        .bind(id, id, now, now)
+        .run();
+    }
+    const response = await mf.dispatchFetch(
+      "https://status.example/v1/services/api",
+      { headers: { "x-runtime-now": String(maintenanceClock) } },
+    );
+    const body = PublicServiceStatusResponseSchema.parse(await response.json());
+    expect(body.data.components.map((c) => c.id)).toEqual([
+      "component-a",
+      "component-ä",
+      "component-B",
+      "public-api",
+    ]);
+  });
+  it("pins maintenance scan time across pages and filters private targets", async () => {
+    const path = "https://status.example/v1/maintenance-windows";
+    const first = await mf.dispatchFetch(`${path}?limit=1`, {
+      headers: { "x-runtime-now": String(maintenanceClock) },
+    });
+    expect(first.status).toBe(200);
+    const body = PublicMaintenanceWindowListResponseSchema.parse(
+      await first.json(),
+    );
+    expect(body.data).toHaveLength(1);
+    expect(body.data[0].target_services).toEqual(["api"]);
+    expect(body.data[0].target_components).toEqual(["public-api"]);
+    const next = await mf.dispatchFetch(
+      `${path}?limit=1&cursor=${encodeURIComponent(body.page.next_cursor!)}`,
+      { headers: { "x-runtime-now": String(maintenanceClock + 60_000) } },
+    );
+    const page = PublicMaintenanceWindowListResponseSchema.parse(
+      await next.json(),
+    );
+    expect(page.data).toHaveLength(1);
+    expect(page.data[0].maintenance_id).not.toBe(body.data[0].maintenance_id);
+    expect(page.page.next_cursor).toBeNull();
+    const fresh = await mf.dispatchFetch(path, {
+      headers: { "x-runtime-now": String(maintenanceClock + 60_000) },
+    });
+    expect(
+      PublicMaintenanceWindowListResponseSchema.parse(await fresh.json()).data,
+    ).toEqual([]);
+    const replay = await mf.dispatchFetch(
+      `${path}?from=2026-09-12T08:00:00.123Z&cursor=${encodeURIComponent(body.page.next_cursor!)}`,
+      { headers: { "x-runtime-now": String(maintenanceClock) } },
+    );
+    expect(replay.status).toBe(400);
+  });
+  it("rejects invalid maintenance ranges and repeated parameters", async () => {
+    for (const query of [
+      "from=bad",
+      "from=2026-09-12T08:00:00%2B00:00",
+      "from=2026-09-13T08:00:00Z&to=2026-09-12T08:00:00Z",
+      "limit=1&limit=2",
+      "unknown=1",
+    ]) {
+      expect(
+        (
+          await mf.dispatchFetch(
+            `https://status.example/v1/maintenance-windows?${query}`,
+          )
+        ).status,
+      ).toBe(400);
+    }
+  });
   it("serves public incidents with existing schemas, redaction and signed pagination", async () => {
     const first = await mf.dispatchFetch(
       "https://untrusted.example/v1/incidents?limit=1",
@@ -327,6 +504,33 @@ async function seedIncidents() {
           "INSERT INTO incident_component_relations(incident_id,component_id,update_sequence,action) VALUES(?,?,1,'added')",
         )
         .bind(id, component)
+        .run();
+    }
+  }
+  for (let index = 1; index <= 2; index++) {
+    const id = `0199d0a8-2e12-7a59-a51e-${String(index + 100).padStart(12, "0")}`;
+    await db
+      .prepare(
+        "INSERT INTO maintenance_windows(maintenance_id,title,description,expected_impact,starts_at,ends_at,created_by,created_at,updated_at) VALUES(?,'Maintenance','Planned work','degraded',?,?,'private-actor',?,?)",
+      )
+      .bind(
+        id,
+        new Date(maintenanceClock - 60_000).toISOString(),
+        new Date(maintenanceClock + 30_000).toISOString(),
+        now,
+        now,
+      )
+      .run();
+    for (const [kind, target] of [
+      ["service", "api"],
+      ["component", "public-api"],
+      ["component", "private-api"],
+    ]) {
+      await db
+        .prepare(
+          "INSERT INTO maintenance_targets(maintenance_id,target_type,target_id) VALUES(?,?,?)",
+        )
+        .bind(id, kind, target)
         .run();
     }
   }
