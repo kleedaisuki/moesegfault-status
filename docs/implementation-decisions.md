@@ -1,0 +1,40 @@
+# 实现决策与验证边界 / Implementation decisions and verification boundaries
+
+## 运行时边界 / Runtime boundaries
+
+- Stable Rust `status-domain` 是无 I/O 的确定性领域核心，编译为 WASM；TypeScript Worker 负责认证、D1、Queue、R2 和调度。领域规则不在 TypeScript 再实现一份。 / Stable Rust owns deterministic domain rules compiled to WASM; TypeScript owns platform I/O without duplicating those rules.
+- `@moesegfault/contracts` 的严格 Zod schema 同时生成 OpenAPI 3.1.1；管理员 RPC 和 Ops 客户端共享这些类型。 / Strict Zod schemas generate OpenAPI 3.1.1 and are shared across admin RPC and Ops.
+- `AdminRpc` 是具名 Service Binding 入口，不挂载在 status 公网 HTTP 上。Gateway 验证 Access JWT，status 再执行领域授权。 / AdminRpc is a named private entrypoint; Access authentication and domain authorization remain separate checks.
+- 一个 D1 数据库承载领域事务。使用 `D1Database.batch()` 原子提交，不能把跨多次 await 的读改写假装成事务。并发更新必须由数据库内的版本/幂等门控保护。 / One D1 database owns domain transactions; atomic batches require in-database revision/idempotency guards.
+- 完整状态评估使用单例单调 `evaluation_generation`（评估代数）保护“读取全部输入 → 纯函数规划 → 原子提交”。所有 guard 必须排在 batch 的领域写入之前；Issue、monitor checkpoint、维护、覆盖、目录与 `current_statuses` 等真实输入通过 trigger 推进代数，audit/outbox 不推进。全局 guard 会使无关目标的并发变更保守地重试，但 D1 单写者和当前数据量下，这比易漏依赖的逐目标版本简单且可审计；若实测争用显著，再以冲突率与写负载证据演进为逐目标代数。 / Complete status evaluation uses a singleton monotonic `evaluation_generation` to protect read-all-inputs → pure planning → atomic commit. Every guard precedes domain writes; triggers advance the generation for actual inputs, not audit/outbox. This global guard may conservatively retry on an unrelated target change, but under D1's single-writer model and present volume it is simpler and safer than dependency-prone per-target epochs. Move to per-target generations only if measured conflict and write-load evidence justifies it.
+- Service 的持久 `dependency_risk` 由 Rust 在同一 generation 快照的完整依赖图和各服务 `direct_status` 上计算，绝不递归读取旧 `effective_impact`。真实 effective transition 在同一事务内向反向依赖服务及 supporting component 写入持久重评 outbox；无 transition 不 fanout，因此循环依赖会收敛而不会制造事件风暴。 / Persisted service `dependency_risk` is computed by Rust from the complete graph and service `direct_status` values in the same generation snapshot, never recursively from stale `effective_impact`. A real effective transition atomically emits durable reevaluation outbox events for reverse dependents and supporting components; no transition means no fanout, so cycles converge instead of producing event storms.
+- 公网新建 Correlation ID；认证后的内部调用保留可信执行标识。身份与执行上下文不得混同。 / Public ingress creates correlation IDs; authenticated internal execution propagates trusted identifiers separately from principals.
+- 机器 JWT 绑定单个 service、environment 和 deployment，并有稳定 jti 和最长 15 分钟有效期。配置固定 issuer/audience/JWKS，不接受 token 指定的密钥地址。 / Machine JWTs bind service, environment, deployment, jti, and a maximum 15-minute lifetime to pinned trust configuration.
+- 主动探测只声明实际执行位置，不在一个 Cron Worker 中伪造多个独立区域。配置中的区域观测不足必须得到 unknown。 / Probes report actual execution locations; missing regional quorum yields unknown rather than fabricated coverage.
+- R2 上传使用带校验和、元数据和不可覆盖条件的短期签名 URL；产物提交根据实际 R2 校验和验证，不把客户端元数据作为内容证明。 / Uploads use short-lived checksum-bound conditional URLs; commits verify actual object checksums.
+
+## 工程依据 / Engineering evidence
+
+- [Cloudflare Workers best practices](https://developers.cloudflare.com/workers/best-practices/workers-best-practices/): use platform bindings, bounded bodies, explicit background work, generated environment types.
+- [D1 batch API](https://developers.cloudflare.com/d1/worker-api/d1-database/): statement batches execute transactionally; failures roll back the batch.
+- [Workers Rust support](https://developers.cloudflare.com/workers/languages/rust/): WASM modules require Workers-compatible initialization of wasm-bindgen glue.
+- [Workers Service Binding RPC](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/rpc/): named entrypoints provide the internal management transport.
+- [CausalMesh research preprint](https://arxiv.org/abs/2508.15647): recent research highlights causal-cache correctness for migrating serverless computations. This is a research signal, not evidence that this project needs a causal cache. The design instead keeps authority in D1 and exposes freshness explicitly; no new cache-coordination subsystem is introduced.
+
+## 完成判据 / Completion criteria
+
+源设计仍是完整需求，以下只是实现验收索引，不缩小范围。 / The source designs remain authoritative; this checklist does not reduce their scope.
+
+| 范围 / Scope            | 必须检查的证据 / Required evidence                                                                                                                                                          |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 数据库 / Database       | 本地 D1 迁移、外键、不可变历史、版本冲突、事务回滚、保留策略 / local D1 migrations, constraints, immutable history, OCC, rollback, retention                                                |
+| 领域 / Domain           | 窗口、迟滞、多位置 quorum、stale、Issue recurrence、Incident 生命周期、循环依赖 / windows, hysteresis, quorum, freshness, recurrence, state machines, dependency cycles                     |
+| HTTP 与 RPC / Contracts | OpenAPI 生成一致性、严格输入、错误格式、路径白名单、认证/授权/CSRF、签名游标 / generated consistency, strict inputs, errors, route allowlists, authentication, authorization, CSRF, cursors |
+| 异步 / Async            | Queue 重复/乱序/延迟/retry/DLQ/replay，不产生重复领域副作用 / duplicate, reordered, delayed, retried and replayed deliveries without duplicate domain effects                               |
+| 探测 / Probes           | 并发预算、每目标限制、deadline、SSRF 防护、真实位置、策略 revision / concurrency budgets, deadlines, SSRF, actual locations, immutable policy revisions                                     |
+| 部署来源 / Provenance   | Manifest 幂等、内容冲突、签名上传、真实摘要/Build ID/source map 校验、ready 门禁 / manifests, conflicts, uploads, digests, Build IDs, source maps, readiness gate                           |
+| 可观测性 / Telemetry    | 上下文传播、脱敏 canary、有界指标基数、后端故障隔离、自递归禁止 / context propagation, redaction, bounded cardinality, failure isolation, recursion prevention                              |
+| Ops                     | 类型检查、生产构建、角色门控、证据查询与操作、故障和过期时不显示全绿 / typecheck, build, role gates, evidence and mutations, unavailable/stale behavior                                     |
+| 发布 / Release          | CI 测试、WASM 构建、Worker dry-run、GitHub Pages 构建、生产配置和外部集成门禁 / CI, WASM, Worker dry-runs, Pages build, production configuration and integration gates                      |
+
+不得因单元测试通过而宣称生产集成完成；外部 Access、遥测后端、机器 issuer 和资源绑定必须另外核验。 / Passing unit tests never proves production integration; external identity, telemetry, and resource configuration require separate verification.

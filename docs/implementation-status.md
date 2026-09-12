@@ -1,43 +1,57 @@
-# 实现验收记录 / Implementation audit
+# 实现验收记录 / Implementation acceptance
 
-本文件是工作状态索引，不替代源设计，也不代表完成声明。 / This is a work index, not a replacement for the designs or a completion claim.
+## 范围与结论 / Scope and conclusion
 
-## 已验证的基线 / Verified baseline
+已完成 `status-design.md` 与 `observability-standard.md` 对本仓库的代码实现和本地验收。此结论不等同于生产上线：真实 Access、机器 issuer、外部遥测、通知接收方、地域分布及灾难恢复演练仍属于运行手册中的上线门禁，未以本地模拟冒充云端验证。
 
-- `26a4f3e`：原始设计与已创建 D1 资源配置。 / Source designs and provisioned D1 configuration.
-- `256d854`、`d5b09fa`：编号迁移 `0001`–`0005`；18 项数据库测试和真实本地 D1 演进验证。 / Numbered migrations with 18 database tests and real local D1 upgrade validation.
-- `79c931a`、`a14e405`：Stable Rust 领域核心；28 项 native 测试、WASM 构建、Clippy 与 rustfmt。 / Stable Rust core with native tests, WASM, Clippy, and rustfmt.
-- `d88dc3e`：pnpm 工作区、共享契约、WASM 桥、遥测基础；37 项契约/遥测测试及 OpenAPI lint。 / Typed workspace foundations with 37 contract/telemetry tests and OpenAPI lint.
-- Status Worker 已通过本地 workerd 烟雾验证：四个公共集合端点返回 200，空平台为 `unknown`，未声明管理路由为 404，未认证 ingest 为 401，Cron 可运行。 / Local workerd smoke tests cover public reads, unknown empty state, missing admin routes, rejected anonymous ingest, and Cron.
+The repository implementation and local acceptance for both source designs are complete. This is not a production launch claim: real identity providers, external telemetry, notification receivers, geographic distribution, and disaster-recovery exercises remain the runbook's deployment gates. Local fixtures are not presented as cloud evidence.
 
-以上测试证明对应基线，不自动证明后来修改或完整生产链路。 / These results establish the corresponding baseline, not subsequent changes or complete production integration.
+## 最终复验 / Final verification — 2026-09-12
 
-### 2026-09-12 集成检查点 / Integration checkpoint
+| 检查 / Check                                     | 结果 / Result                                                                                                             |
+| ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| Node 24.21.0 全量 Vitest / Complete Vitest suite | 62 个文件，303/303 通过 / 62 files, 303/303 passed                                                                        |
+| Stable Rust native tests                         | 29/29 通过 / passed                                                                                                       |
+| Python SQL tests                                 | 22/22 通过 / passed                                                                                                       |
+| Rust format + Clippy                             | `--all-targets --all-features -- -D warnings` 通过 / passed                                                               |
+| pnpm workspace typecheck                         | 全部包及 Ops UI 通过 / all packages and Ops passed                                                                        |
+| pnpm build                                       | Rust WASM、三个 Worker dry-run、Vite UI 通过 / WASM, three Worker dry-runs, and Vite passed                               |
+| OpenAPI                                          | 生成无漂移、lint、协议 gate 通过 / no generation drift; lint and protocol gate passed                                     |
+| 格式与依赖 / Formatting and dependencies         | Prettier、锁定 pnpm install 通过 / Prettier and frozen install passed                                                     |
+| 实际本地运行时 / Actual local runtime            | workerd + D1 全 8 迁移 + WASM + RSA JWT + named AdminRpc，4/4 通过 / passed                                               |
+| UI 视觉 / UI visual checks                       | Edge 断线首页及桌面、600px 窄屏静态证据图已检查 / disconnected home and desktop/narrow static evidence fixtures inspected |
 
-- `4ebf3f1`：显式恢复证据绑定最新故障，Rust 29 项测试与严格 Clippy 通过。 / Explicit recovery binds to the latest fault; 29 Rust tests and strict Clippy pass.
-- 重建 WASM 后，本次工作树 Vitest 40 个文件、187 项测试通过；Status TypeScript、18 项数据库测试和 OpenAPI lint 通过。并行模块仍在编辑，此结果不是最终冻结验收。 / After rebuilding WASM, this working-tree checkpoint passed 187 tests across 40 files, Status type checking, 18 database tests, and OpenAPI lint. Concurrent modules remain in development; this is not final acceptance.
-- 诊断生产者参考 SDK 已有有界投递、稳定重试身份、源头脱敏及 canary 测试；需纳入发布与完整集成验收。 / The diagnostic producer SDK has bounded delivery, stable retry identity, source redaction, and canary tests; release/integration acceptance remains.
-- 通知已接入真实 Queue producer/consumer 与固定 HTTPS webhook adapter；事件仅含标识，接收方去重与 DLQ 运维仍需部署演练。 / Notifications now have concrete Queue and pinned-webhook adapters; receiver deduplication and DLQ operations still need deployment exercises.
-- 遥测适配器已接入私有 RPC 与 viewer 查询路由；实际外部后端尚未配置，测试不代表真实供应商集成已运行。 / Telemetry adapters now expose private RPC and viewer queries; actual external backends remain unconfigured.
+Vite 会报告上游 Zod 注释位置的非阻断警告；Windows native 链接器会报告导入库创建信息。以上均未被描述成源代码编译错误，也没有通过隐藏失败取得绿色结果。
 
-以下工作列表中的早期描述由此检查点补充，但只有完成最终路径验证后才能关闭条目。 / This checkpoint supplements the earlier descriptions below; only final path verification closes an item.
+Vite emits non-blocking upstream Zod annotation warnings, and the Windows native linker reports import-library creation. Neither is a source compilation error; failures were not hidden to obtain passing results.
 
-## 仍需完成的端到端路径 / Remaining end-to-end paths
+## 设计条款到实现证据 / Design-to-evidence map
 
-| 需求 / Requirement                                    | 当前证据与后续动作 / Evidence and next action                                                                                                                                                                                      |
-| ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 新服务初始化 / Service bootstrap                      | 新的 retention 注册/赋值及部署激活 RPC 已实现并局部测试；需完成根入口、Gateway、运行手册和全量回归整合。 / New retention and activation commands require final cross-module regression.                                            |
-| 外部 Issue 恢复 / External Issue recovery             | 不能用沉默当健康；正在增加与最新 fault event 因果绑定的 recovery signal、不可变策略阈值和原子审计。需覆盖旧行安全迁移、乱序、重放与并发故障。 / Explicit causally bound recovery is in progress; silence must never imply health.  |
-| 目录演进 / Catalog evolution                          | 正在增加 OCC service/component/dependency mutation，允许通过受审接口创建依赖环及多服务支撑关系；还需验证实际状态/查询消费这些关系。 / Catalog mutations and consumption of support relationships are in progress.                  |
-| 遥测查询适配器 / Telemetry query adapters             | 当前 registry 与 D1 evidence graph 已存在，但真实 allowlisted backend dispatch、安全 UI link、受控凭据解析和过期/故障响应尚缺完整实现。 / Registry metadata exists; executable backend query/link adapters remain to be completed. |
-| 生产 outbox 接收器 / Production outbox receivers      | 内部重评估事件可投递；通知接收器目前只有可注入测试接口。需声明实际 Queue/Service Binding 并构造生产 adapter，不能把未配置事件当已投递。 / Internal reevaluation works; concrete production notification adapters are still needed. |
-| RPC/Synthetic 探针 / RPC and synthetic probes         | 已有安全接口与执行器，但真实 Env 还没有具名目标绑定到 adapter registry 的映射；缺少绑定时明确失败而不是伪造成功。 / Concrete binding-to-adapter wiring remains; missing capability fails explicitly.                               |
-| Diagnostic 生产者脱敏 / Diagnostic producer redaction | 遥测 logger 已脱敏，尚需参考 producer builder/SDK 与 canary 测试，约束 summary 和 locator query 的敏感值。入口防御不能代替源头清理。 / Add a producer helper and canary tests; ingestion cannot replace source redaction.          |
-| 完整验收 / Full acceptance                            | 重新构建 WASM 后执行全量测试、类型检查、格式检查、OpenAPI 同步、两个 Worker dry-run、UI build，并逐项核对源设计第 16 节及可观测性第 17 节。 / Rebuild and re-audit every source-design gate.                                       |
+| 设计范围 / Design scope                             | 实现 / Implementation                                                                                                                                        | 验证证据 / Evidence                                                                                               |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| §2–3 架构与不变量 / architecture and invariants     | Rust 纯领域核心、平台适配、独立私有 AdminRpc、单 D1 权威 / pure core, adapters, private RPC, one authority                                                   | `crates/status-domain`, `workers/status`; native and runtime acceptance                                           |
+| §4–5 领域与依赖 / domain and dependencies           | 策略修订、迟滞、因果恢复、Issue/Incident 状态机、循环安全依赖 / policy revisions, hysteresis, causal recovery, lifecycle, cycle-safe dependencies            | Rust tests; `atomic-evaluation`, `recovery`, `dependency-consistency`, `dependency-persistence` integration tests |
+| §6 数据流 / data flow                               | JWT ingress → Queue → 幂等原子聚合；真实区域分派与检查点 / authenticated ingest, Queue, atomic dedup, regional dispatch                                      | diagnostic ingest/consumer tests; real SQL/WASM regional and lease regressions                                    |
+| §7 存储 / storage                                   | 编号迁移 0001–0008、不可变历史、证据定位器、内容寻址 R2 / migrations, immutable history, evidence locators, content-addressed artifacts                      | 22 SQL tests; real workerd migrations; deployment integration tests                                               |
+| §8 API / API contracts                              | 10 个公共 HTTP 契约、严格私有 RPC、签名游标、RFC 9457 / public contracts, private RPC, signed cursors, errors                                                | generated OpenAPI; public, gateway and contract tests                                                             |
+| §4/6 与可观测性 §5 部署来源 / deployment provenance | 真实 SHA-256、Content-MD5、source map 与 runtime 关联、ready gate / actual byte digests, map pairing, readiness                                              | provenance, deployment and strict release-wire tests; three Worker dry-runs                                       |
+| §9 身份与授权 / identity and authorization          | 固定 issuer/JWKS、短期机器 scope、Access 角色及同源 CSRF / pinned trust, short-lived machine scope, Access roles, same-origin CSRF                           | gateway/auth security tests; actual RSA JWT runtime acceptance                                                    |
+| §10 一致性 / consistency                            | generation guard、完整信号 overlay、同批领域/状态/audit/outbox；可收敛依赖 fanout / guarded full-signal batches and convergent propagation                   | race/rollback tests, newer-fault interleaving, maintenance/suppression/override integration                       |
+| §11 故障与背压 / failure and backpressure           | 有界正文、队列、超时、重试、DLQ、outbox；不以失联伪造目标故障 / bounded work, retry, DLQ, no fabricated failure observations                                 | producer, notification, regional transport, security and outage tests                                             |
+| §12 自观测 / self-observation                       | invocation 资源、低基数指标、D1 spans、Queue/调度/评估计数、共享 250 AE 预算 / resource identity, metrics, spans, shared budget                              | instrumentation, analytics-budget and replay/no-commit-counter tests                                              |
+| §13 诊断图 / diagnostic graph                       | affected services、typed dependency paths、source locations、transitions、audit summary 与安全 UI / complete bounded structured graph                        | `diagnostic-context.test.ts`; UI context and XSS/freshness tests                                                  |
+| §14 保留 / retention                                | 精确 revision、Incident 固定摘要、证据解绑而非级联销毁 / pinned revisions and summaries, non-destructive cleanup                                             | SQL retention tests; scheduler cleanup and deployment-reference tests                                             |
+| §15 迁移与协议演进 / evolution                      | 编号迁移、schema_version、OpenAPI gate、显式发布顺序 / migrations, versioned envelopes, compatibility gate                                                   | populated-upgrade tests, Queue schema tests, release gate tests                                                   |
+| §16 验证 / acceptance                               | 全量本地测试、真实平台运行时、严格发布 wire、失效 UI / local suites, real runtime, release wire, unavailable UI                                              | final verification table above; `tests/runtime/README.md`                                                         |
+| 可观测性标准 / observability standard               | 上下文与身份分离、源头脱敏、可验证产物、有限后端查询、有界导出与禁止递归 / separated identity/context, redaction, provenance, scoped queries, bounded export | telemetry and producer canaries; evidence adapters; runbook exporter/region limitations                           |
 
-## 部署状态 / Deployment state
+测试文件均在仓库中可复现；临时截图位于忽略的本地验证目录，不是生产截图。测试 mock 用于失败注入与第三方协议校验；实际 workerd 测试另行覆盖平台调用与 SQL/WASM 执行。
 
-- 远端 D1 `moesegfault-status` 仅已创建；未执行远端迁移。 / Remote D1 is provisioned but unmigrated.
-- 未部署 Status/Gateway Worker、Queue/R2/Analytics Engine 或 GitHub Pages。 / No production application/resources have been deployed by this implementation task.
-- Access、机器 issuer、遥测后端和通知目标需按运行手册配置并演练；不能将模板配置误报为已验证集成。 / Identity, telemetry, and notification configuration require separate operational validation.
-- 目标保持完整且进行中，不以通过部分单元测试替代以上缺失链路。 / The full goal remains active; partial passing tests do not substitute for missing paths.
+Tests are reproducible from the repository. Temporary screenshots are local validation artifacts, not production screenshots. Mocks test faults and vendor protocols; separate workerd tests cover actual platform calls and SQL/WASM execution.
+
+## 云端状态与上线门禁 / Cloud state and deployment gates
+
+- D1 `moesegfault-status` 已创建，ID `40674161-5e59-470c-bb1c-33bc612d7e6b`；未执行远端迁移。 / D1 is provisioned; remote migrations were not applied.
+- 未部署 Worker、Queue/R2/AE 配套资源或 GitHub Pages，也未向远端仓库推送。 / No application deployment, companion-resource provisioning, Pages deployment, or Git push was performed.
+- 运行手册保留真实身份、后端标签映射、通知去重/DLQ、不同实际 colo、恢复演练和发布审批检查。缺配置时能力失败关闭，不返回假健康。 / The runbook retains real identity, label mapping, dedup/DLQ, geographic, recovery, and approval checks. Missing configuration fails closed rather than fabricating health.
+- CI 工作流已经实现且对应本地命令通过；未声称 GitHub 托管 runner 已实际执行。 / CI workflows are implemented and their local checks pass; hosted-runner execution is not claimed.

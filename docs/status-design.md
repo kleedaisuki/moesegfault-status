@@ -80,8 +80,21 @@ Durable Objects、PostgreSQL、Kafka 和自建 ClickHouse 不属于该服务架�
 | 实体 | 关键字段 |
 | --- | --- |
 | Service | `service_name`、`display_name`、`description`、`owner`、`criticality`、`enabled` |
-| Component | `component_id`、`service_name`、`display_name`、`public`、`sort_order` |
+| Component | 全局唯一且不可改名的 `component_id`、唯一 owner `service_name`、`display_name`、`public`、`sort_order`；额外支撑服务位于 `component_services` / Globally unique immutable `component_id`, sole owner `service_name`, display fields, and additional support services in `component_services` |
 | Dependency | `source_service`、`target_service`、`kind`、`criticality`、`capability` |
+
+`component_id` 是跨服务、Incident、Maintenance 与状态历史共享的外部目标 ID，不能按
+owner 形成 `(service_name, component_id)` 命名空间，也不能通过“改名”迁移 owner。
+这样，多服务共同支撑的一个公开能力仍只有一个状态身份：`components.service_name`
+保存唯一 owner，`component_services(role='supporting')` 保存零到多个额外关系。下线时
+设置 `enabled=false`，不删除或复用 ID。
+
+`component_id` is an external target ID shared across services, Incidents,
+Maintenance, and status history. It is not owner-scoped and cannot be renamed
+to move ownership. A multi-service public capability therefore retains one
+status identity: `components.service_name` stores the sole owner while
+`component_services(role='supporting')` stores zero or more additional
+relationships. Retirement sets `enabled=false`; IDs are never deleted or reused.
 
 依赖图必须是有向图。循环依赖可以存在，但影响计算必须使用 visited set，禁止递归展开造成无限传播。
 
@@ -375,7 +388,8 @@ GitHub Actions 构建产物并计算 digest 后：
 | 表 | 作用 | 关键约束/索引 |
 | --- | --- | --- |
 | `services` | 服务目录 | `service_name UNIQUE` |
-| `components` | 对外状态组件 | `(service_name, component_id) UNIQUE` |
+| `components` | 对外状态组件 | `component_id PRIMARY KEY`（全局稳定）；`service_name` 是唯一 owner |
+| `component_services` | Component 的额外服务关系 | `(component_id, service_name) UNIQUE`；至多一个 `role='owner'` |
 | `service_dependencies` | 有向依赖图 | `(source_service, target_service, capability) UNIQUE` |
 | `monitors` | probe 定义 | `next_run_at` index |
 | `evaluation_policies` | 不可变规则 revision | `(policy_id, revision) UNIQUE` |
