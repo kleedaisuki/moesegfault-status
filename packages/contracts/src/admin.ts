@@ -702,12 +702,158 @@ export type DiagnosticContextLocator = z.infer<
   typeof DiagnosticContextLocatorSchema
 >;
 
+/** 受影响服务与事实来源 / Affected service with typed sources of association. */
+export const DiagnosticAffectedServiceSchema = z.strictObject({
+  service_name: ServiceNameSchema,
+  relations: z
+    .array(
+      z.discriminatedUnion("kind", [
+        z.strictObject({ kind: z.literal("locator") }),
+        z.strictObject({ kind: z.literal("issue"), issue_id: UuidV7Schema }),
+        z.strictObject({
+          kind: z.literal("incident"),
+          incident_id: UuidV7Schema,
+        }),
+        z.strictObject({
+          kind: z.literal("deployment"),
+          deployment_id: UuidV7Schema,
+        }),
+        z.strictObject({
+          kind: z.literal("evidence"),
+          telemetry_reference_id: UuidV7Schema,
+        }),
+        z.strictObject({
+          kind: z.literal("component"),
+          component_id: z.string().min(1).max(128),
+        }),
+      ]),
+    )
+    .min(1)
+    .max(100),
+  current_status: z
+    .strictObject({
+      direct_status: StatusSchema,
+      dependency_risk: z.enum([
+        "none",
+        "degraded",
+        "partial_outage",
+        "major_outage",
+        "unknown",
+      ]),
+      effective_impact: StatusSchema,
+      evaluated_at: UtcDateTimeSchema,
+      fresh_until: UtcDateTimeSchema,
+      revision: RevisionSchema,
+    })
+    .nullable(),
+});
+export type DiagnosticAffectedService = z.infer<
+  typeof DiagnosticAffectedServiceSchema
+>;
+
+/** 依赖路径中的有类型目录边 / Typed catalog edge in a dependency path. */
+export const DiagnosticDependencyEdgeSchema = z.strictObject({
+  source_service: ServiceNameSchema,
+  target_service: ServiceNameSchema,
+  capability: z.string().min(1).max(128),
+  kind: z.enum(["required", "optional", "degraded_fallback"]),
+  criticality: z.enum(["low", "medium", "high", "critical"]),
+});
+
+/** 从受影响根服务开始的有界、无环依赖路径 / Bounded acyclic dependency path from an affected root service. */
+export const DiagnosticDependencyPathSchema = z.strictObject({
+  root_service: ServiceNameSchema,
+  leaf_service: ServiceNameSchema,
+  edges: z.array(DiagnosticDependencyEdgeSchema).min(1).max(8),
+});
+export type DiagnosticDependencyPath = z.infer<
+  typeof DiagnosticDependencyPathSchema
+>;
+
+/** 由 source evidence 与 deployment provenance 验证的源码位置 / Source location verified against source evidence and deployment provenance. */
+export const DiagnosticSourceLocationSchema = z.strictObject({
+  telemetry_reference_id: UuidV7Schema,
+  deployment_id: UuidV7Schema,
+  repository_url: HttpsUrlSchema,
+  git_commit: z.string().regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+  path: z.string().min(1).max(1024),
+  line: z.number().int().positive().max(10_000_000).optional(),
+  column: z.number().int().positive().max(10_000_000).optional(),
+  provenance_verified: z.boolean(),
+});
+export type DiagnosticSourceLocation = z.infer<
+  typeof DiagnosticSourceLocationSchema
+>;
+
+/** 投影后的状态迁移；details_json 不跨越私有边界 / Projected status transition; details_json does not cross the private boundary. */
+export const DiagnosticStatusTransitionSchema = z.strictObject({
+  transition_id: UuidV7Schema,
+  target_type: z.enum(["service", "component"]),
+  target_id: z.string().min(1).max(128),
+  service_name: ServiceNameSchema,
+  sequence: RevisionSchema,
+  from_status: StatusSchema.nullable(),
+  to_status: StatusSchema,
+  source_type: z.enum([
+    "observation",
+    "diagnostic_event",
+    "issue",
+    "maintenance",
+    "operator_override",
+    "freshness",
+  ]),
+  source_id: z.string().min(1).max(255),
+  policy: z
+    .strictObject({
+      policy_id: z.string().min(1).max(128),
+      revision: RevisionSchema,
+    })
+    .nullable(),
+  correlation_id: UuidV7Schema.nullable(),
+  occurred_at: UtcDateTimeSchema,
+});
+export type DiagnosticStatusTransition = z.infer<
+  typeof DiagnosticStatusTransitionSchema
+>;
+
+/** 审计事件的结构化计数摘要 / Structured count summary of relevant audit events. */
+export const DiagnosticAuditSummarySchema = z.strictObject({
+  event_count: z.number().int().nonnegative().max(500),
+  first_occurred_at: UtcDateTimeSchema.nullable(),
+  last_occurred_at: UtcDateTimeSchema.nullable(),
+  actions: z
+    .array(
+      z.strictObject({
+        action: z.string().min(1).max(128),
+        count: z.number().int().positive().max(500),
+      }),
+    )
+    .max(100),
+  actors: z
+    .array(
+      z.strictObject({
+        actor_type: z.enum(["human", "machine", "system"]),
+        actor_subject: z.string().min(1).max(255),
+        event_count: z.number().int().positive().max(500),
+      }),
+    )
+    .max(100),
+});
+export type DiagnosticAuditSummary = z.infer<
+  typeof DiagnosticAuditSummarySchema
+>;
+
 /** 有界诊断上下文结果 / Bounded diagnostic context; raw telemetry remains in its backend. */
 export const DiagnosticContextSchema = z.strictObject({
   issues: z.array(IssueSummarySchema).max(100),
   incidents: z.array(AdminIncidentSchema).max(100),
+  affected_services: z.array(DiagnosticAffectedServiceSchema).max(100),
+  dependency_paths: z.array(DiagnosticDependencyPathSchema).max(100),
   evidence: z.array(TelemetryReferenceSchema).max(200),
   deployments: z.array(DeploymentManifestSchema).max(100),
+  source_locations: z.array(DiagnosticSourceLocationSchema).max(200),
+  status_transitions: z.array(DiagnosticStatusTransitionSchema).max(200),
+  audit_summary: DiagnosticAuditSummarySchema,
   truncated: z.boolean(),
 });
 export type DiagnosticContext = z.infer<typeof DiagnosticContextSchema>;
