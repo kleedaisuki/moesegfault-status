@@ -11,7 +11,7 @@ jobs:
   check:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
+    timeout-minutes: 8
     environment: production-database
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -35,16 +35,64 @@ jobs:
           const valid = token.length > 0 && token === token.trim() && account === configured;
           console.log(JSON.stringify({token_present: token.length > 0, token_has_no_outer_whitespace: token === token.trim(), account_matches_repository_config: account === configured}));
           if (!valid) process.exit(1);
-          let failed = false;
-          for (const [label, resource] of [
-            ['worker_read', 'workers/workers/fd8e808de9c14c4db796da1980ce5392'],
-            ['d1_list', 'd1/database'],
-            ['d1_target_read', `d1/database/${database}`],
-          ]) {
-            const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${account}/${resource}`, {headers: {authorization: `Bearer ${token}`}, signal: AbortSignal.timeout(15000)});
-            const result = await response.json();
-            console.log(JSON.stringify({check: label, http_status: response.status, success: result.success === true, error_codes: (result.errors ?? []).map(error => error.code)}));
-            failed ||= !response.ok || result.success !== true;
+          // 仅白名单字段进入日志；API 错误正文可能含凭据，不得回显。 / Log allowlisted fields only; never echo API error bodies.
+          const pick = (row, fields) => Object.fromEntries(fields.flatMap(key => {
+            const value = row?.[key];
+            return typeof value === 'string' || typeof value === 'boolean' || typeof value === 'number' ? [[key, value]] : [];
+          }));
+          const checks = [];
+          /** 独立执行只读请求，失败不短路其他能力检查。 / Run independent GET checks without short-circuiting on denied permissions. */
+          async function check(label, path, project = () => ({})) {
+            let record;
+            try {
+              const response = await fetch(`https://api.cloudflare.com/client/v4/${path}`, {
+                headers: {authorization: `Bearer ${token}`}, redirect: 'error', signal: AbortSignal.timeout(15000),
+              });
+              const body = await response.json();
+              const success = response.ok && body.success === true;
+              record = {check: label, http_status: response.status, success,
+                error_codes: (Array.isArray(body.errors) ? body.errors : []).map(error => error.code).filter(code => Number.isInteger(code)),
+                ...(success ? project(body.result) : {}),
+                ...(body.result_info ? {pagination: pick(body.result_info, ['page', 'per_page', 'total_pages', 'total_count', 'count'])} : {}),
+              };
+            } catch {
+              record = {check: label, success: false, transport_or_json_error: true};
+            }
+            checks.push(record);
+            console.log(JSON.stringify(record));
+            return record;
           }
-          if (failed) process.exit(1);
+          const accountPath = `accounts/${account}`;
+          // 两种 token 归属分别核验；其中一种失败不等于凭据失效。 / Verify both token owner types; one denied endpoint does not invalidate the credential.
+          const userToken = await check('user_token_verify', 'user/tokens/verify', row => pick(row, ['status']));
+          const accountToken = await check('account_token_verify', `${accountPath}/tokens/verify`, row => pick(row, ['status']));
+          await check('d1_target_read', `${accountPath}/d1/database/${database}`, row => pick(row, ['uuid', 'name']));
+          // 脚本列表证明已上传脚本；不能把 Workers 元数据资源当成已部署应用。 / Script listing is not the empty Workers metadata resource.
+          await check('deployed_worker_scripts', `${accountPath}/workers/scripts`, rows => ({scripts: (Array.isArray(rows) ? rows : []).filter(row => row.id?.startsWith('moesegfault-')).map(row => pick(row, ['id']))}));
+          await check('r2_target_bucket', `${accountPath}/r2/buckets/moesegfault-observability`, row => pick(row, ['name', 'location', 'storage_class']));
+          await check('queues_first_page', `${accountPath}/queues?per_page=100&page=1`, rows => ({queues: (Array.isArray(rows) ? rows : []).filter(row => row.queue_name?.startsWith('moesegfault-status-')).map(row => pick(row, ['queue_id', 'queue_name']))}));
+          const zones = [
+            ['moesegfault.dev', '6edff81c6ed02f412e70868076411a5e'],
+            ['kleeworks.org', 'ca6b6ea568097779553f8724e69a42b5'],
+          ];
+          for (const [name, id] of zones) {
+            await check(`zone_${name}`, `zones/${id}`, row => ({...pick(row, ['id', 'name', 'status']), account_matches: row.account?.id === account}));
+            for (const prefix of ['status', 'ops']) {
+              const host = `${prefix}.${name}`;
+              await check(`dns_${host}`, `zones/${id}/dns_records?name=${encodeURIComponent(host)}&per_page=100`, rows => ({records: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id', 'name', 'type', 'proxied']))}));
+              await check(`worker_domain_${host}`, `${accountPath}/workers/domains?hostname=${encodeURIComponent(host)}`, rows => ({domains: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id', 'hostname', 'service', 'environment', 'zone_id']))}));
+            }
+          }
+          await check('access_organization', `${accountPath}/access/organizations`, row => pick(row, ['name', 'auth_domain']));
+          await check('access_apps_first_page', `${accountPath}/access/apps?per_page=100&page=1`, rows => ({apps: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id', 'name', 'domain', 'type', 'aud']))}));
+          await check('access_identity_providers_first_page', `${accountPath}/access/identity_providers?per_page=100&page=1`, rows => ({identity_providers: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id', 'name', 'type']))}));
+          // 不输出邮箱、IP、登录记录；身份 ID 足以判断是否已初始化。 / Do not expose email, IP, or login history; IDs suffice to detect initialized identities.
+          await check('access_users_first_page', `${accountPath}/access/users?per_page=100&page=1`, rows => ({users: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id']))}));
+          const failed = checks.filter(row => !row.success && !['user_token_verify', 'account_token_verify'].includes(row.check));
+          console.log(JSON.stringify({summary: {checks: checks.length, denied_or_failed: failed.map(row => row.check),
+            token_verified: [userToken, accountToken].some(row => row.success && row.status === 'active'),
+            list_scope: 'first page only; inspect pagination before concluding a resource is absent',
+            write_permissions: 'not tested by this read-only audit'}}));
+          // 保留真实失败结论，但所有独立检查已执行完毕。 / Preserve a failing result only after every independent check completes.
+          if (failed.length || ![userToken, accountToken].some(row => row.success && row.status === 'active')) process.exitCode = 1;
           JS
