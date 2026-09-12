@@ -261,6 +261,15 @@ importers:
         specifier: 6.2.12
         version: 6.2.12
 
+  workers/probe-executor:
+    dependencies:
+      '@moesegfault/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@moesegfault/telemetry':
+        specifier: workspace:*
+        version: link:../../packages/telemetry
+
   workers/status:
     dependencies:
       '@moesegfault/contracts':
