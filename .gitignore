@@ -5,6 +5,7 @@ node_modules/
 .idea/
 
 # 本地凭据不得入库。 / Never version local credentials.
+/.local/credentials/
 .dev.vars
 .dev.vars.*
 .env
