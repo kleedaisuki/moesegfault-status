@@ -4,13 +4,13 @@ import { readFile } from "node:fs/promises";
 import { createHash, pbkdf2Sync } from "node:crypto";
 
 /** 本地公开测试向量，不是生产凭据。 / Public local test vector, never production credentials. */
-const password = "test-only password with 空白";
+const password = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcd_-";
 const salt = Buffer.alloc(16, 7);
 const record = JSON.stringify({
   algorithm: "PBKDF2-SHA256",
-  iterations: 600000,
+  iterations: 100000,
   salt: salt.toString("base64url"),
-  hash: pbkdf2Sync(password, salt, 600000, 32, "sha256").toString("base64url"),
+  hash: pbkdf2Sync(password, salt, 100000, 32, "sha256").toString("base64url"),
 });
 let mf: Miniflare;
 const correlation_id = "0199d0a8-2e12-7a59-a51e-000000000001";
@@ -80,6 +80,11 @@ beforeAll(async () => {
           },
           env: {
             NORMAL: { type: "worker", worker: "admin", exportName: "AdminRpc" },
+            UNSUPPORTED_KDF: {
+              type: "worker",
+              worker: "unsupported-kdf",
+              exportName: "AdminRpc",
+            },
             ROTATED: {
               type: "worker",
               worker: "rotated",
@@ -106,6 +111,19 @@ beforeAll(async () => {
       },
       ...[
         { name: "admin", env },
+        {
+          name: "unsupported-kdf",
+          env: {
+            ...env,
+            ADMIN_PASSWORD_RECORD: {
+              type: "json" as const,
+              value: JSON.stringify({
+                ...JSON.parse(record),
+                iterations: 600000,
+              }),
+            },
+          },
+        },
         {
           name: "rotated",
           env: {
@@ -191,7 +209,7 @@ describe("Rust single-administrator native WebCrypto and D1", () => {
     );
     expect(missing.problem.status).toBe(503);
     const wrong = await call("loginAdministrator", {
-      password: password + "wrong",
+      password: "0" + password.slice(1),
     });
     expect(wrong.problem.status).toBe(401);
     for (const result of [missing, wrong]) {
@@ -220,6 +238,22 @@ describe("Rust single-administrator native WebCrypto and D1", () => {
         .status,
     ).toBe(503);
   });
+  it("rejects unsupported KDF records before consuming a login attempt", async () => {
+    await reset();
+    const result = await call(
+      "loginAdministrator",
+      { password },
+      "UNSUPPORTED_KDF",
+    );
+    expect(result.problem.status).toBe(503);
+    expect(JSON.stringify(result)).not.toContain(password);
+    const db = await mf.getD1Database("DB", "admin");
+    expect(
+      (await db
+        .prepare("SELECT attempts FROM administrator_login_budget")
+        .first())!.attempts,
+    ).toBe(0);
+  });
   it("rejects extra fields and malformed credentials", async () => {
     expect(
       (await call("loginAdministrator", { password, role: "admin" })).problem
@@ -236,7 +270,7 @@ describe("Rust single-administrator native WebCrypto and D1", () => {
   it("matches independent Node PBKDF2 and stores only token digest", async () => {
     await reset();
     expect(
-      (await call("loginAdministrator", { password: password + "wrong" }))
+      (await call("loginAdministrator", { password: "0" + password.slice(1) }))
         .problem.status,
     ).toBe(401);
     const result = await call("loginAdministrator", { password });
@@ -314,7 +348,7 @@ describe("Rust single-administrator native WebCrypto and D1", () => {
       .run();
     const results = await Promise.all(
       Array.from({ length: 8 }, () =>
-        call("loginAdministrator", { password: password + "wrong" }),
+        call("loginAdministrator", { password: "0" + password.slice(1) }),
       ),
     );
     expect(results.filter((r) => r.problem.status === 401)).toHaveLength(1);

@@ -13,6 +13,11 @@ use wasm_bindgen::{JsCast, JsValue};
 use wasm_bindgen_futures::JsFuture;
 use worker::Env;
 
+// 平台限制为 100000 次；192-bit 随机密钥而非人工密码提供抗离线猜测强度。
+// The platform caps iterations at 100000; a 192-bit random key, not a human password, supplies offline-guessing resistance.
+/// 固定平台可执行 KDF 策略。 / Fixed platform-executable KDF policy.
+const KDF_ITERATIONS: u32 = 100_000;
+
 /// 不携带秘密的内部错误。 / Internal error without secret-bearing details.
 type Result<T> = std::result::Result<T, u16>;
 /// 公共 RPC 分发只接受固定方法和严格字段。 / Public RPC dispatch accepts only fixed methods and strict fields.
@@ -142,7 +147,7 @@ fn record(env: &Env) -> Result<(PasswordRecord, String)> {
         .map_err(|_| 503u16)?
         .to_string();
     let record: PasswordRecord = serde_json::from_str(&secret).map_err(|_| 503u16)?;
-    if record.algorithm != "PBKDF2-SHA256" || record.iterations != 600000 {
+    if record.algorithm != "PBKDF2-SHA256" || record.iterations != KDF_ITERATIONS {
         return Err(503);
     }
     let salt = URL_SAFE_NO_PAD.decode(&record.salt).map_err(|_| 503u16)?;
@@ -226,7 +231,7 @@ async fn derive(password: &str, salt: &[u8]) -> Result<Vec<u8>> {
     ))
     .await
     .map_err(|_| 503u16)?;
-    let params = object(json!({"name":"PBKDF2","hash":"SHA-256","iterations":600000}))?;
+    let params = object(json!({"name":"PBKDF2","hash":"SHA-256","iterations":KDF_ITERATIONS}))?;
     js_sys::Reflect::set(&params, &"salt".into(), &js_sys::Uint8Array::from(salt))
         .map_err(|_| 503u16)?;
     let derive: js_sys::Function = js_sys::Reflect::get(&subtle, &"deriveBits".into())

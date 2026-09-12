@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { createHash, pbkdf2Sync, randomBytes } from "node:crypto";
 
 /** 仅内存测试凭据，不读取本机管理员密码。 / In-memory test credentials; never read the local administrator password. */
-const password = randomBytes(32).toString("base64url");
+const password = randomBytes(24).toString("base64url");
 const salt = randomBytes(16);
 const record = JSON.stringify({
   algorithm: "PBKDF2-SHA256",
-  iterations: 600000,
+  iterations: 100000,
   salt: salt.toString("base64url"),
-  hash: pbkdf2Sync(password, salt, 600000, 32, "sha256").toString("base64url"),
+  hash: pbkdf2Sync(password, salt, 100000, 32, "sha256").toString("base64url"),
 });
 let mf: Miniflare;
 
@@ -115,7 +115,9 @@ it("runs final Rust gateway → named AdminRpc → D1 login and revocation witho
   });
   expect(forged.status).toBe(401);
   expect(await forged.text()).not.toContain("admin@example.test");
-  const rejected = await post("login", { password: password + "wrong" });
+  const rejected = await post("login", {
+    password: (password[0] === "0" ? "1" : "0") + password.slice(1),
+  });
   expect(rejected.status).toBe(401);
   expect(rejected.headers.get("set-cookie")).toBeNull();
   const rejectedBody = await rejected.text();
