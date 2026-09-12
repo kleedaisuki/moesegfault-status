@@ -1,0 +1,21 @@
+{
+  "name": "@moesegfault/ops",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@moesegfault/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "7.3.6",
+    "vitest": "5.0.0",
+    "happy-dom": "18.0.1"
+  }
+}
