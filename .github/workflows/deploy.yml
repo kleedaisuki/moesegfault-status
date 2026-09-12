@@ -75,17 +75,35 @@ jobs:
           --config "release.${RELEASE_SERVICE}.json" --verify-only
           > "${RUNNER_TEMP}/release-manifest.json"
       - name: Register artifacts, require ready, then publish this exact version
-        # 三个秘密仅存在于真正发布步骤；status-release 只调用 versions upload/deploy。
-        # All three secrets exist only in the publishing step; status-release calls versions upload/deploy only.
+        # 秘密仅存在于真正发布步骤；首次注入游标密钥，代码发布只调用 versions upload/deploy。
+        # Secrets exist only in this step; provision the cursor key, then publish code using versions only.
         env:
           RELEASE_SERVICE: ${{ inputs.service }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           MACHINE_JWT_PRIVATE_KEY: ${{ secrets.MACHINE_JWT_PRIVATE_KEY }}
+          CURSOR_SIGNING_KEY: ${{ inputs.service == 'status' && secrets.CURSOR_SIGNING_KEY || '' }}
           MOE_RELEASE_API_URL: https://status.moesegfault.dev
-        run: >-
-          cargo run --locked -p status-release --
-          --config "release.${RELEASE_SERVICE}.json"
+        run: |
+          node --input-type=module <<'NODE'
+          import { execFileSync } from 'node:child_process';
+          // 密钥只通过 stdin 传递，子进程输出不回显。 / Pass the secret on stdin without echoing child output.
+          if (process.env.RELEASE_SERVICE === 'status') {
+            const value = process.env.CURSOR_SIGNING_KEY;
+            if (!value || value.length < 32) throw new Error('Runtime cursor secret is missing');
+            const env = { ...process.env };
+            delete env.CURSOR_SIGNING_KEY;
+            delete env.MACHINE_JWT_PRIVATE_KEY;
+            try {
+              execFileSync(process.execPath, ['node_modules/wrangler/bin/wrangler.js', 'secret', 'bulk', '--config', 'wrangler.jsonc'], {
+                input: JSON.stringify({ CURSOR_SIGNING_KEY: value }), env, stdio: ['pipe', 'pipe', 'pipe'],
+              });
+            } catch { throw new Error('Runtime secret provisioning failed; child output suppressed'); }
+            console.log('Runtime cursor secret provisioned.');
+          }
+          NODE
+          unset CURSOR_SIGNING_KEY
+          target/debug/status-release --config "release.${RELEASE_SERVICE}.json" | tee "${RUNNER_TEMP}/release-result.log"
       - name: Explain a blocked release without weakening the gate
         if: failure()
         run: |

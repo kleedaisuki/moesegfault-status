@@ -1,0 +1,50 @@
+name: Bootstrap a pre-production Rust Worker
+
+# 引导也必须通过 Actions；不触碰 DNS，不授予生产 ready。 / Bootstrap also runs in Actions, without DNS or production readiness.
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: Existing bootstrap status or first private probe
+        required: true
+        type: choice
+        options:
+          - status
+          - probe
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release-${{ inputs.service }}
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-js
+      - uses: ./.github/actions/setup-rust-wasm
+      - name: Install pinned Rust Worker build tool
+        run: cargo install worker-build --version 0.8.5 --locked
+      - name: Verify bootstrap boundaries without credentials
+        run: pnpm exec vitest run tests/bootstrap-cli.test.ts
+      - name: Build actual Rust Worker
+        env:
+          BOOTSTRAP_SERVICE: ${{ inputs.service }}
+        run: cargo run --locked -p status-build -- --service "${BOOTSTRAP_SERVICE}"
+      - name: Verify remote precondition and publish restricted bootstrap
+        # 管理员秘密从不进入 Actions；其他凭据只在此步骤。 / Administrator secrets never enter Actions; credentials exist only here.
+        env:
+          BOOTSTRAP_SERVICE: ${{ inputs.service }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CURSOR_SIGNING_KEY: ${{ inputs.service == 'status' && secrets.CURSOR_SIGNING_KEY || '' }}
+        run: node scripts/operations/prepare-bootstrap.mjs "${BOOTSTRAP_SERVICE}"
