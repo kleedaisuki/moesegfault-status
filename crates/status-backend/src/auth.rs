@@ -23,6 +23,10 @@ use url::Url;
 #[cfg(target_arch = "wasm32")]
 pub mod cloudflare;
 
+/// 发布与验证使用同一份公开 JWKS；不包含任何私钥。
+/// Publishing and verification share these public JWKS bytes; no private keys are embedded.
+pub const MACHINE_JWKS: &str = include_str!("../../../config/machine-jwks.json");
+
 /// 签名或标准声明验证失败。 / Signature or standard claim validation failed.
 const INVALID_TOKEN: HttpError = HttpError::new(
     401,
@@ -52,12 +56,16 @@ pub struct MachineTrust {
     audience: String,
     /// 与 issuer 同源的固定地址。 / Pinned same-origin URL.
     jwks: Url,
+    /// 仅精确部署配置可使用本地公钥。 / Only exact deployment configuration selects embedded keys.
+    own_jwks: bool,
 }
 
 impl MachineTrust {
     /// 只接受同源 HTTPS JWKS，拒绝 URL 内嵌凭据。
     /// Accept same-origin HTTPS JWKS only, rejecting embedded URL credentials.
     pub fn new(issuer: &str, audience: &str, jwks: &str) -> Result<Self, HttpError> {
+        let own_jwks = issuer == "https://status.moesegfault.dev"
+            && jwks == "https://status.moesegfault.dev/.well-known/jwks.json";
         let issuer_url = Url::parse(issuer).map_err(|_| UNAVAILABLE)?;
         let jwks = Url::parse(jwks).map_err(|_| UNAVAILABLE)?;
         if !secure_url(&issuer_url)
@@ -71,7 +79,15 @@ impl MachineTrust {
             issuer: issuer.into(),
             audience: audience.into(),
             jwks,
+            own_jwks,
         })
+    }
+
+    /// 本地公钥只由固定配置选择；解析失败绝不回退至网络。
+    /// Only pinned configuration selects local keys; parse failures never fall back to network.
+    pub fn embedded_keys(&self) -> Option<Result<PublicKeys, HttpError>> {
+        self.own_jwks
+            .then(|| PublicKeys::parse(MACHINE_JWKS.as_bytes()))
     }
 
     /// 固定下载地址，不由 JWT header 影响。 / Pinned fetch URL, unaffected by JWT headers.

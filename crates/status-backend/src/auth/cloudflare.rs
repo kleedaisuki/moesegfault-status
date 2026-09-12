@@ -38,12 +38,17 @@ pub async fn authenticate_machine(
         .get("authorization")
         .map_err(|_| INVALID_TOKEN)?;
     let token = bearer(authorization.as_deref())?;
-    let keys = remote_keys(
-        trust.jwks_url().as_str(),
-        token,
-        &[Algorithm::RS256, Algorithm::ES256, Algorithm::EdDSA],
-    )
-    .await?;
+    let keys = match trust.embedded_keys() {
+        Some(keys) => keys?,
+        None => {
+            remote_keys(
+                trust.jwks_url().as_str(),
+                token,
+                &[Algorithm::RS256, Algorithm::ES256, Algorithm::EdDSA],
+            )
+            .await?
+        }
+    };
     verify_machine(token, trust, &keys, Date::now().as_millis() as f64 / 1000.0)
 }
 

@@ -4,15 +4,11 @@
 
 use serde_json::json;
 use status_backend::{
-    bootstrap, database::Database, deployments, diagnostics, notifications, public, scheduling,
-    telemetry,
+    auth::MACHINE_JWKS, bootstrap, database::Database, deployments, diagnostics, notifications,
+    public, scheduling, telemetry,
 };
 use wasm_bindgen::prelude::*;
 use worker::{Context, Env, Request, Response};
-
-/// 仅嵌入可公开的机器签名公钥；私钥只存在于部署凭据库。
-/// Embed only public machine verification keys; private keys live exclusively in deployment secret storage.
-const MACHINE_JWKS: &str = include_str!("../../../config/machine-jwks.json");
 
 /// 安全边界错误不回传 SQL、平台异常或配置。 / Boundary errors never disclose SQL, platform exceptions, or configuration.
 fn problem(status: u16, code: &str, correlation: &str) -> worker::Result<Response> {

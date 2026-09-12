@@ -135,3 +135,44 @@ fn rejects_untrusted_configuration_and_unbounded_inputs() {
     assert!(bearer(Some(&format!("Bearer {}", "x".repeat(8192)))).is_err());
     assert!(PublicKeys::parse(&vec![b' '; 262145]).is_err());
 }
+
+/// 自有信任源必须逐字匹配，规范化别名和路径变化不能取得本地公钥。
+/// Own trust must match literally; normalized aliases and path changes never select local keys.
+#[test]
+fn embedded_keys_require_exact_configured_issuer_and_url() {
+    let issuer = "https://status.moesegfault.dev";
+    let url = "https://status.moesegfault.dev/.well-known/jwks.json";
+    let own = MachineTrust::new(issuer, "status", url).unwrap();
+    assert!(own.embedded_keys().unwrap().is_ok());
+    for (issuer, url) in [
+        ("https://status.moesegfault.dev/", url),
+        ("https://status.moesegfault.dev/other", url),
+        (issuer, "https://status.moesegfault.dev/other"),
+        (
+            issuer,
+            "https://status.moesegfault.dev/.well-known/jwks.json?other=1",
+        ),
+        (
+            issuer,
+            "https://status.moesegfault.dev:443/.well-known/jwks.json",
+        ),
+        ("https://issuer.example", "https://issuer.example/jwks"),
+    ] {
+        assert!(MachineTrust::new(issuer, "status", url)
+            .unwrap()
+            .embedded_keys()
+            .is_none());
+    }
+    // 有效的外部签名也不能冒充本站签发者。 / Even a valid external signature cannot impersonate our issuer.
+    for vector in vectors() {
+        let token = vector["tokens"]["valid"].as_str().unwrap();
+        assert!(verify_machine(token, &own, &keys(&vector["jwk"]), 1700000010.0).is_err());
+        assert!(verify_machine(
+            token,
+            &own,
+            &own.embedded_keys().unwrap().unwrap(),
+            1700000010.0
+        )
+        .is_err());
+    }
+}
