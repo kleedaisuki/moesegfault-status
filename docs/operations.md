@@ -4,6 +4,8 @@
 
 ## 当前云端事实 / Current cloud evidence
 
+2026-09-12 最终状态：三个 Worker 已通过 Actions 发布并经管理接口激活；真实浏览器登录、跨域读取和注销已验证。Cron 与诊断消费者已启用，通知及监控目标仍未配置。最新发布回执与 CI 见 [云端执行记录](deployment-status.md)。下方 bootstrap 记录保留为历史，不再代表当前可用性。 / Final state: all three Workers were released through Actions and activated through the management API. Real browser login, cross-origin reads and logout passed. Cron and the diagnostics consumer are enabled; notifications and monitor targets remain unconfigured. See the execution record for receipts and CI. Bootstrap entries below are historical, not current availability.
+
 以下本机应用上传属于早期历史，后续流程已纠正为仅 GitHub Actions 部署。 / Local application uploads below are early history; all subsequent deployment uses GitHub Actions exclusively.
 
 - 本机 Wrangler 已部署最终 Rust status 的 bootstrap 版本；`ADMIN_PASSWORD_RECORD` secret bulk 成功，平台列表类型为 `secret_text`，secret 更新后的版本已切换 100% 流量。 / Local Wrangler deployed the Rust bootstrap and installed the administrator secret, confirmed as secret_text with a full version cutover.

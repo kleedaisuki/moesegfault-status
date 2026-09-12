@@ -1,5 +1,23 @@
 # 云端执行记录 / Cloud execution record
 
+## 最终生产验收 / Final production acceptance
+
+2026-09-12 23:27 +08:00：以下结果取代下方早期截点的待办状态。 / These results supersede the outstanding state at the earlier cutoff below.
+
+| Service      | Actions release                                                                           | Cloudflare version                     | Registry state |
+| ------------ | ----------------------------------------------------------------------------------------- | -------------------------------------- | -------------- |
+| status 0.1.2 | [34701836331](https://github.com/kleedaisuki/moesegfault-status/actions/runs/34701836331) | `34a0409d-b360-4890-a4f2-833fbb1caa60` | active         |
+| ops 0.1.0    | [34700970772](https://github.com/kleedaisuki/moesegfault-status/actions/runs/34700970772) | `89f187e1-e2e0-46d9-b666-bdef8e27b29e` | active         |
+| probe 0.1.0  | [34700972438](https://github.com/kleedaisuki/moesegfault-status/actions/runs/34700972438) | `713fb233-0ee5-48c7-8cb0-06a33ab99d8e` | active         |
+
+- 三次均取得真实 `release-completed` 回执，产物上传、摘要验证和 ready 门禁后才发布；管理员随后通过实际上下文修订号激活，D1 三个生产指针均为 active。 / All runs produced actual release receipts after artifact verification and readiness; authenticated revision-checked activation established three active production pointers.
+- 四个公开 GET 返回 200，固定运维来源 CORS 正确。真实 Chrome 表单登录、管理接口和跨域读取成功，页面不展示邮箱；注销及旧 Cookie 重放均返回 401。 / Four public reads return 200 with fixed-origin CORS. Real Chrome login, private reads and cross-origin reads passed without rendering the email; logout and revoked-cookie replay return 401.
+- 平台原生密码派生拒绝原先的参数；改为仅供本地生成的 192-bit 随机管理员凭据使用的 PBKDF2-SHA256/100000，原口令不变、记录仅存 Worker Secret，实际生产登录验证通过。此策略不是人工低熵密码的通用建议。 / The native password derivation path rejected the former parameters. The generated 192-bit operator credential now uses PBKDF2-SHA256/100000 with the same password and a Worker Secret verifier; real production login passed. This is not a general policy for low-entropy human passwords.
+- 本机仅配置资源：每分钟 Cron、diagnostics consumer（batch 10 / timeout 5s / retries 5 / diagnostics DLQ）。域名未改动，默认地址与预览仍禁用。 / Local operations configured only resources: per-minute Cron and the diagnostics consumer with its DLQ; domains were preserved and default URLs/previews remain disabled.
+- 通知消费者未启用；监控与公开组件均为零。私有 probe 已发布，但没有登记主机或证明真实地域探测；不将平台上线解释为外部服务健康。 / Notifications remain disabled and no monitors or public components exist. The private probe is published, but no target hosts or real geographic probe execution are asserted.
+- 工单草稿已按要求删除；不再推进旧 SHA 缓存工单。 / The support draft was deleted as requested; no old-SHA cache ticket is pursued.
+- 发布源提交 `c4fe6d4` 的 [完整 CI 34701836178](https://github.com/kleedaisuki/moesegfault-status/actions/runs/34701836178) 全部成功。最终 D1 外键检查为空、quick_check 为 ok、退出后会话数为零。 / All CI jobs passed for release source c4fe6d4; final D1 foreign-key checks are empty, quick_check is ok and no sessions remain after logout.
+
 核验截点：2026-09-12 22:55 UTC+08:00。资源已初始化，正式发布仍在修复和验证中；不得把工作流绿色状态或引导部署当成生产上线证明。 / Verification cutoff: 2026-09-12 22:55 UTC+08:00. Resources are initialized, but production release remains under repair and verification. Neither a green workflow nor a bootstrap deployment proves production readiness.
 
 ## 当前资源与边界 / Current resources and boundaries
