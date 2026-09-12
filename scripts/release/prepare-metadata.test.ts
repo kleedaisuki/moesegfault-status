@@ -167,6 +167,11 @@ describe("release metadata", () => {
     ).rejects.toMatchObject({ code: "ENOENT" });
     expect(workflow).toContain("workflow_dispatch:");
     expect(workflow).toContain("environment: production-release");
+    // 发布失败必须穿过 tee 传播到 Actions。 / Release failures must propagate through tee to Actions.
+    expect(workflow).toMatch(
+      /name: Register artifacts, require ready, then publish this exact version\s+shell: bash/u,
+    );
+    expect(workflow).toContain("set -euo pipefail");
     expect(workflow).not.toMatch(
       /\brun:\s*[^\n]*(?:wrangler\s+deploy|triggers\s+deploy)/iu,
     );

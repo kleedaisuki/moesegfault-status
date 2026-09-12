@@ -1,7 +1,7 @@
 name: Release a production Worker version
 
-# 仅发布既有 Worker 的版本；DNS、域名、routes、triggers 和首次 bootstrap 只允许本机运维。
-# Publish versions of existing Workers only; DNS, domains, routes, triggers, and first bootstrap remain local operations.
+# 代码发布与首次引导均通过 Actions；DNS、域名和 triggers 仅由本机运维配置。
+# Code releases and first bootstrap use Actions; DNS, domains and triggers remain local operations.
 on:
   workflow_dispatch:
     inputs:
@@ -75,6 +75,7 @@ jobs:
           --config "release.${RELEASE_SERVICE}.json" --verify-only
           > "${RUNNER_TEMP}/release-manifest.json"
       - name: Register artifacts, require ready, then publish this exact version
+        shell: bash
         # 秘密仅存在于真正发布步骤；首次注入游标密钥，代码发布只调用 versions upload/deploy。
         # Secrets exist only in this step; provision the cursor key, then publish code using versions only.
         env:
@@ -85,6 +86,8 @@ jobs:
           CURSOR_SIGNING_KEY: ${{ inputs.service == 'status' && secrets.CURSOR_SIGNING_KEY || '' }}
           MOE_RELEASE_API_URL: https://status.moesegfault.dev
         run: |
+          # 日志管道不得吞掉发布失败。 / Log pipelines must preserve release failures.
+          set -euo pipefail
           node --input-type=module <<'NODE'
           import { execFileSync } from 'node:child_process';
           // 密钥只通过 stdin 传递，子进程输出不回显。 / Pass the secret on stdin without echoing child output.
@@ -112,7 +115,7 @@ jobs:
             echo ''
             echo '- The release command returned non-zero; no fallback or bootstrap bypass was attempted.'
             echo '- Missing service catalog/bootstrap state, JWT/JWKS mismatch, R2 failure, artifact commit failure, or a non-ready deployment is an expected hard stop before version upload.'
-            echo '- DNS, routes, custom domains, triggers, and first bootstrap remain explicit local operations.'
+            echo '- DNS, routes, custom domains and triggers remain explicit local operations; bootstrap code uses its dedicated Actions workflow.'
           } >> "${GITHUB_STEP_SUMMARY}"
       - name: Record the deliberately narrow deployment boundary
         env:
