@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import {
+  PublicIncidentListResponseSchema,
+  PublicIncidentResponseSchema,
+} from "../../packages/contracts/src/public.js";
 import { generateKeyPairSync, sign, type KeyObject } from "node:crypto";
 
 const issuer = "https://rust-runtime.cloudflareaccess.com";
@@ -83,6 +88,7 @@ beforeAll(async () => {
           env: {
             ISSUER: { type: "json", value: issuer },
             AUDIENCE: { type: "json", value: audience },
+            DB: { type: "d1", id: "rust-backend-runtime" },
           },
         },
         dev: { outboundService: { type: "worker", worker: "jwks" } },
@@ -105,12 +111,91 @@ beforeAll(async () => {
       },
     ],
   });
-});
+  await seedIncidents();
+}, 60_000);
 afterAll(async () => {
   await mf?.dispose();
 });
 
-describe("Rust authentication in actual workerd", () => {
+describe("Rust backend in actual workerd", () => {
+  it("serves public incidents with existing schemas, redaction and signed pagination", async () => {
+    const first = await mf.dispatchFetch(
+      "https://untrusted.example/v1/incidents?limit=1",
+    );
+    expect(first.status).toBe(200);
+    const body = PublicIncidentListResponseSchema.parse(await first.json());
+    expect(body.data).toHaveLength(1);
+    expect(body.links.self).toBe(
+      "https://status.moesegfault.dev/v1/incidents?limit=1",
+    );
+    expect(body.page.next_cursor).not.toBeNull();
+    const next = await mf.dispatchFetch(
+      `https://status.example/v1/incidents?limit=1&cursor=${encodeURIComponent(body.page.next_cursor!)}`,
+    );
+    const second = PublicIncidentListResponseSchema.parse(await next.json());
+    expect(second.data[0].incident_id).not.toBe(body.data[0].incident_id);
+    expect(second.page.next_cursor).toBeNull();
+    const detail = await mf.dispatchFetch(
+      `https://status.example/v1/incidents/${body.data[0].incident_id}`,
+    );
+    const incident = PublicIncidentResponseSchema.parse(await detail.json());
+    expect(incident.data.affected_components).toEqual(["public-api"]);
+    expect(incident.data.updates).toHaveLength(1);
+    expect(JSON.stringify(incident)).not.toContain("private-actor");
+    expect(JSON.stringify(incident)).not.toContain("private-api");
+    const replay = await mf.dispatchFetch(
+      `https://status.example/v1/incidents?states=resolved&cursor=${encodeURIComponent(body.page.next_cursor!)}`,
+    );
+    expect(replay.status).toBe(400);
+  });
+  it("rejects invalid incident queries and returns safe missing-record problems", async () => {
+    for (const path of [
+      "/v1/incidents?limit=01",
+      "/v1/incidents?limit=1&limit=2",
+      "/v1/incidents?states=unknown",
+      "/v1/incidents?private=true",
+      "/v1/incidents/not-a-uuid",
+    ]) {
+      const response = await mf.dispatchFetch(`https://status.example${path}`);
+      expect(response.status).toBe(400);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+    }
+    const missing = await mf.dispatchFetch(
+      "https://status.example/v1/incidents/0199d0a8-2e12-7a59-a51e-000000009999",
+    );
+    expect(missing.status).toBe(404);
+  });
+  it("rolls back every write when a Rust D1 batch fails", async () => {
+    const response = await mf.dispatchFetch(
+      "https://status.example/database/rollback",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ failed: true, row: { count: 0 } });
+  });
+  it("returns row decode errors without poisoning the Rust isolate", async () => {
+    const response = await mf.dispatchFetch(
+      "https://status.example/database/row-error",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ failed: true, count: 7 });
+  });
+  it("binds null, text, safe integers and blobs without interpolation", async () => {
+    const response = await mf.dispatchFetch(
+      "https://status.example/database/values",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      rows: [
+        {
+          missing: null,
+          text: "'; DROP TABLE services; --",
+          integer: Number.MAX_SAFE_INTEGER,
+          boolean: 1,
+          blob: "00FF",
+        },
+      ],
+    });
+  });
   it("fetches pinned keys and reuses cache for machine requests", async () => {
     for (const alg of ["RS256", "ES256", "EdDSA", "RS256"]) {
       const response = await mf.dispatchFetch(
@@ -187,3 +272,62 @@ describe("Rust authentication in actual workerd", () => {
     ).toBe(413);
   });
 });
+
+/** 在真实 D1 中应用全部迁移及公开/私有组件夹具。 / Apply all migrations and public/private component fixtures in real D1. */
+async function seedIncidents() {
+  const db = await mf.getD1Database("DB", "rust");
+  for (const name of (await readdir("migrations"))
+    .filter((name) => name.endsWith(".sql"))
+    .sort()) {
+    const statements: string[] = JSON.parse(
+      execFileSync("python", ["tests/runtime/split_sql.py"], {
+        input: await readFile(`migrations/${name}`, "utf8"),
+        encoding: "utf8",
+        windowsHide: true,
+      }),
+    );
+    await db.batch(statements.map((sql) => db.prepare(sql)));
+  }
+  const now = "2026-09-12T08:00:00.000Z";
+  await db
+    .prepare(
+      "INSERT INTO services(service_name,display_name,owner,criticality,created_at,updated_at) VALUES('api','API','private-actor','high',?,?)",
+    )
+    .bind(now, now)
+    .run();
+  for (const [id, visibility] of [
+    ["public-api", 1],
+    ["private-api", 0],
+  ] as const) {
+    await db
+      .prepare(
+        "INSERT INTO components(component_id,service_name,display_name,public,created_at,updated_at) VALUES(?,'api',?,?,?,?)",
+      )
+      .bind(id, id, visibility, now, now)
+      .run();
+  }
+  for (let index = 1; index <= 2; index++) {
+    const id = `0199d0a8-2e12-7a59-a51e-${String(index).padStart(12, "0")}`;
+    const update = `0199d0a8-2e12-7a59-a51e-${String(index + 10).padStart(12, "0")}`;
+    await db
+      .prepare(
+        "INSERT INTO incidents(incident_id,started_at,detected_at,created_at,created_by) VALUES(?,?,?,?,?)",
+      )
+      .bind(id, now, now, now, "private-actor")
+      .run();
+    await db
+      .prepare(
+        "INSERT INTO incident_updates(update_id,incident_id,sequence,title,state,impact,public_message,actor_subject,occurred_at) VALUES(?,?,1,'Example incident','investigating','degraded','Investigating','private-actor',?)",
+      )
+      .bind(update, id, now)
+      .run();
+    for (const component of ["public-api", "private-api"]) {
+      await db
+        .prepare(
+          "INSERT INTO incident_component_relations(incident_id,component_id,update_sequence,action) VALUES(?,?,1,'added')",
+        )
+        .bind(id, component)
+        .run();
+    }
+  }
+}

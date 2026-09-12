@@ -1024,14 +1024,20 @@ dependencies = [
  "futures-util",
  "getrandom",
  "hmac",
+ "js-sys",
  "jsonwebtoken",
+ "percent-encoding",
  "serde",
+ "serde-wasm-bindgen",
  "serde_json",
  "sha2",
  "status-domain",
  "thiserror",
  "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
  "worker",
+ "worker-sys",
 ]
 
 [[package]]
@@ -1053,6 +1059,7 @@ dependencies = [
 name = "status-runtime-tests"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "serde_json",
  "status-backend",
  "worker",

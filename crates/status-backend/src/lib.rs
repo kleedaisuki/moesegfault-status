@@ -7,4 +7,7 @@
 pub mod access;
 pub mod auth;
 pub mod cursor;
+pub mod database;
 pub mod http;
+#[cfg(target_arch = "wasm32")]
+pub mod public;
