@@ -16,6 +16,7 @@ mod evaluation;
 mod fingerprint;
 mod lifecycle;
 mod provenance;
+mod recovery;
 
 #[cfg(feature = "wasm")]
 pub use bridge::dispatch_json;
@@ -27,7 +28,7 @@ pub use dependency::{
 pub use diagnostic::{
     evaluate_diagnostic, DiagnosticAction, DiagnosticEvaluationInput, DiagnosticEvaluationPolicy,
     DiagnosticEvaluationResult, DiagnosticEvent, DiagnosticEvidence, DiagnosticIssueSnapshot,
-    DiagnosticSeverity, SeverityStatusMap,
+    DiagnosticSeverity, DiagnosticSignal, SeverityStatusMap,
 };
 pub use evaluation::{
     aggregate_status, evaluate_monitor, AggregationInput, EvaluationPolicy, EvaluationReason,

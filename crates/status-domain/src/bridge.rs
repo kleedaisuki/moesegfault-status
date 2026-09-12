@@ -23,7 +23,8 @@ use crate::{DeploymentManifest, IncidentUpdate};
 )]
 enum Request {
     EvaluateMonitor(EvaluateMonitorPayload),
-    EvaluateDiagnostic(DiagnosticEvaluationInput),
+    // 恢复快照较大，间接存储避免放大所有请求的栈占用。 / Indirect the large recovery snapshot to avoid inflating every request's stack footprint.
+    EvaluateDiagnostic(Box<DiagnosticEvaluationInput>),
     AggregateStatus(AggregationInput),
     CanonicalFingerprint(FingerprintPayload),
     DependencyRisk(DependencyPayload),

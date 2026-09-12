@@ -11,6 +11,17 @@ use crate::{
 };
 use crate::{Environment, IssueState, Status, TelemetryKind, TimeRange};
 
+/// Diagnostic 条件信号；恢复必须是显式正向证据。 / Diagnostic condition signal; recovery must be explicit positive evidence.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiagnosticSignal {
+    /// 条件存在；省略字段的旧生产者保持此语义。 / The condition is present; legacy producers that omit the field retain this meaning.
+    #[default]
+    Fault,
+    /// 检测器已观测到条件消失；静默绝不等价于此信号。 / The detector observed the condition clear; silence is never equivalent to this signal.
+    Recovery,
+}
+
 /// DiagnosticEvent 内嵌的无身份证据；事件身份提供来源绑定。 / Identity-free evidence embedded in a DiagnosticEvent; event identity supplies provenance.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -89,6 +100,11 @@ pub struct DiagnosticEvent {
     pub schema_version: String,
     /// 稳定小写点分事实类别。 / Stable lowercase dotted fact kind.
     pub kind: String,
+    /// 显式故障或恢复信号。 / Explicit fault or recovery signal.
+    #[serde(default)]
+    pub signal: DiagnosticSignal,
+    /// 恢复信号因果引用的最新故障事件。 / Latest fault event causally referenced by a recovery signal.
+    pub recovery_of_event_id: Option<String>,
     /// 运维严重度。 / Operational severity.
     pub severity: DiagnosticSeverity,
     /// 已注册 `service.name`。 / Registered `service.name`.
@@ -135,6 +151,17 @@ impl DiagnosticEvent {
                 "schema_version 1.0, service_name, bounded summary, and dotted kind are required"
                     .into(),
             ));
+        }
+        match (self.signal, self.recovery_of_event_id.as_deref()) {
+            (DiagnosticSignal::Fault, None) => {}
+            (DiagnosticSignal::Recovery, Some(event_id)) => {
+                validate_uuid_v7(event_id, "recovery_of_event_id")?;
+            }
+            _ => {
+                return Err(DomainError::Validation(
+                    "recovery_of_event_id is required exactly for recovery signals".into(),
+                ));
+            }
         }
         if let Some(instance_id) = &self.instance_id {
             uuid::Uuid::parse_str(instance_id).map_err(|_| {
@@ -227,6 +254,9 @@ pub struct DiagnosticEvaluationPolicy {
     pub revision: String,
     /// 确认到 `active` 所需 occurrence 数。 / Occurrences required to confirm into `active`.
     pub minimum_occurrences: u64,
+    /// active Issue 解决所需的连续恢复证据数。 / Consecutive recovery evidence required to resolve an active issue.
+    #[serde(default = "default_recovery_min_occurrences")]
+    pub recovery_min_occurrences: u64,
     /// 显式严重度映射。 / Explicit severity mapping.
     pub status_by_severity: SeverityStatusMap,
 }
@@ -237,9 +267,10 @@ impl DiagnosticEvaluationPolicy {
         if self.policy_id.trim().is_empty()
             || self.revision.trim().is_empty()
             || self.minimum_occurrences == 0
+            || self.recovery_min_occurrences < 2
         {
             return Err(DomainError::Validation(
-                "policy identity, revision, and positive minimum_occurrences are required".into(),
+                "policy identity, positive minimum_occurrences, and recovery_min_occurrences >= 2 are required".into(),
             ));
         }
         self.status_by_severity.validate()
@@ -256,6 +287,13 @@ pub struct DiagnosticIssueSnapshot {
     pub state: IssueState,
     /// 已去重发生数。 / Deduplicated occurrence count.
     pub occurrence_count: u64,
+    /// 当前因果头之后的连续恢复证据数。 / Consecutive recovery evidence after the current causal head.
+    #[serde(default)]
+    pub recovery_count: u64,
+    /// 当前最新故障事件的不可变身份。 / Immutable identity of the current latest fault event.
+    pub last_fault_event_id: Option<String>,
+    /// 最新已接受恢复证据的时间。 / Time of the latest accepted recovery evidence.
+    pub last_recovery_at: Option<DateTime<Utc>>,
     /// 当前最大严重度。 / Current maximum severity.
     pub severity: DiagnosticSeverity,
     /// 创建时策略 revision。 / Policy revision at creation.
@@ -302,6 +340,14 @@ pub enum DiagnosticAction {
     RecordOutOfOrder,
     /// 为已解决条件创建 recurrence。 / Creates a recurrence for a resolved condition.
     CreateRecurrence,
+    /// 首个恢复证据使 active Issue 进入恢复观察。 / First recovery evidence moves an active issue into recovery observation.
+    BeginRecovery,
+    /// 足够新的恢复证据将 Issue 终结为 resolved。 / Sufficiently new recovery evidence terminates the issue as resolved.
+    ResolveRecovery,
+    /// 迟到或同时恢复证据仅记录，不覆盖较新故障。 / Late or simultaneous recovery evidence is recorded without overriding a newer fault.
+    RecordStaleRecovery,
+    /// 未匹配到未解决 Issue 的恢复证据仅记录。 / Recovery evidence without a matching unresolved issue is recorded only.
+    RecordUnmatchedRecovery,
 }
 
 /// Diagnostic 聚合的确定性结果。 / Deterministic Diagnostic aggregation result.
@@ -322,6 +368,10 @@ pub struct DiagnosticEvaluationResult {
     pub action: DiagnosticAction,
     /// 更新后的 occurrence 数。 / Updated occurrence count.
     pub occurrence_count: u64,
+    /// 更新后的连续恢复证据数。 / Consecutive recovery-evidence count after evaluation.
+    pub recovery_count: u64,
+    /// 更新后的最新恢复证据时间。 / Latest recovery-evidence time after evaluation.
+    pub last_recovery_at: Option<DateTime<Utc>>,
     /// 不会因迟到事件倒退的最近时间。 / Latest time, never regressed by a late event.
     pub last_seen_at: DateTime<Utc>,
     /// 更新时必须匹配的 revision；创建时为 `None`。 / Revision that an update must match; `None` for creation.
@@ -345,6 +395,17 @@ pub fn evaluate_diagnostic(
                 "current_issue policy revision differs from evaluator revision".into(),
             ));
         }
+        if let Some(event_id) = issue.last_fault_event_id.as_deref() {
+            validate_uuid_v7(event_id, "current_issue.last_fault_event_id")?;
+        }
+        if (issue.recovery_count == 0) != issue.last_recovery_at.is_none() {
+            return Err(DomainError::Validation(
+                "current_issue recovery_count and last_recovery_at must be present together".into(),
+            ));
+        }
+    }
+    if input.event.signal == DiagnosticSignal::Recovery {
+        return crate::recovery::evaluate_diagnostic_recovery(input, fingerprint.hash);
     }
     let expected_revision = input.current_issue.as_ref().map(|issue| issue.revision);
     let next_count = match &input.current_issue {
@@ -364,6 +425,8 @@ pub fn evaluate_diagnostic(
                 direct_status: input.current_service_status,
                 action: DiagnosticAction::RecordOutOfOrder,
                 occurrence_count: next_count,
+                recovery_count: issue.recovery_count,
+                last_recovery_at: issue.last_recovery_at,
                 last_seen_at: issue.last_seen_at,
                 expected_revision,
             });
@@ -394,6 +457,8 @@ pub fn evaluate_diagnostic(
         direct_status,
         action,
         occurrence_count: count,
+        recovery_count: 0,
+        last_recovery_at: None,
         last_seen_at: input.event.occurred_at,
         expected_revision,
     })
@@ -448,6 +513,10 @@ fn strongest_ranked(current: Status, candidate: Status) -> Status {
         (_, Some(_)) => candidate,
         _ => current,
     }
+}
+
+const fn default_recovery_min_occurrences() -> u64 {
+    2
 }
 
 fn valid_dotted_name(value: &str) -> bool {
@@ -507,6 +576,8 @@ mod tests {
             event_id: "0199d0a8-2e12-7a59-a51e-44aa9b6d1001".into(),
             schema_version: "1.0".into(),
             kind: "dependency.unavailable".into(),
+            signal: DiagnosticSignal::Fault,
+            recovery_of_event_id: None,
             severity: DiagnosticSeverity::Error,
             service_name: "identity".into(),
             environment: Environment::Production,
@@ -528,6 +599,7 @@ mod tests {
             policy_id: "default".into(),
             revision: "1".into(),
             minimum_occurrences: 2,
+            recovery_min_occurrences: 2,
             status_by_severity: SeverityStatusMap {
                 info: Status::Operational,
                 warning: Status::Degraded,
@@ -547,6 +619,9 @@ mod tests {
                 fingerprint_hash: hash,
                 state: IssueState::Observed,
                 occurrence_count: 1,
+                recovery_count: 0,
+                last_fault_event_id: Some(event.event_id.clone()),
+                last_recovery_at: None,
                 severity: DiagnosticSeverity::Warning,
                 policy_revision: "1".into(),
                 last_seen_at: now(),
@@ -566,5 +641,88 @@ mod tests {
         assert_eq!(ignored.action, DiagnosticAction::RecordOutOfOrder);
         assert_eq!(ignored.issue_state, IssueState::Observed);
         assert_eq!(ignored.last_seen_at, now());
+    }
+
+    #[test]
+    fn recovery_requires_current_fault_head_and_never_counts_occurrence() {
+        let fault = event();
+        let hash = fault.validate().unwrap().hash;
+        let mut recovery = fault.clone();
+        recovery.event_id = "0199d0a8-2e12-7a59-a51e-44aa9b6d1002".into();
+        recovery.signal = DiagnosticSignal::Recovery;
+        recovery.recovery_of_event_id = Some(fault.event_id.clone());
+        recovery.occurred_at = now() + Duration::seconds(1);
+        let first = evaluate_diagnostic(&DiagnosticEvaluationInput {
+            event: recovery.clone(),
+            current_issue: Some(DiagnosticIssueSnapshot {
+                fingerprint_hash: hash.clone(),
+                state: IssueState::Active,
+                occurrence_count: 7,
+                recovery_count: 0,
+                last_fault_event_id: Some(fault.event_id.clone()),
+                last_recovery_at: None,
+                severity: DiagnosticSeverity::Error,
+                policy_revision: "1".into(),
+                last_seen_at: now(),
+                revision: 4,
+            }),
+            policy: policy(),
+            current_service_status: Status::PartialOutage,
+            now: now() + Duration::seconds(2),
+        })
+        .unwrap();
+        assert_eq!(first.action, DiagnosticAction::BeginRecovery);
+        assert_eq!(first.issue_state, IssueState::Recovering);
+        assert_eq!(first.occurrence_count, 7);
+        assert_eq!(first.recovery_count, 1);
+
+        recovery.event_id = "0199d0a8-2e12-7a59-a51e-44aa9b6d1003".into();
+        recovery.occurred_at = now() + Duration::seconds(2);
+        let resolved = evaluate_diagnostic(&DiagnosticEvaluationInput {
+            event: recovery.clone(),
+            current_issue: Some(DiagnosticIssueSnapshot {
+                fingerprint_hash: hash.clone(),
+                state: IssueState::Recovering,
+                occurrence_count: 7,
+                recovery_count: 1,
+                last_fault_event_id: Some(fault.event_id.clone()),
+                last_recovery_at: first.last_recovery_at,
+                severity: DiagnosticSeverity::Error,
+                policy_revision: "1".into(),
+                last_seen_at: now(),
+                revision: 5,
+            }),
+            policy: policy(),
+            current_service_status: Status::PartialOutage,
+            now: now() + Duration::seconds(3),
+        })
+        .unwrap();
+        assert_eq!(resolved.action, DiagnosticAction::ResolveRecovery);
+        assert_eq!(resolved.issue_state, IssueState::Resolved);
+        assert_eq!(resolved.occurrence_count, 7);
+
+        recovery.recovery_of_event_id = Some("0199d0a8-2e12-7a59-a51e-44aa9b6d1999".into());
+        let stale = evaluate_diagnostic(&DiagnosticEvaluationInput {
+            event: recovery,
+            current_issue: Some(DiagnosticIssueSnapshot {
+                fingerprint_hash: hash,
+                state: IssueState::Active,
+                occurrence_count: 8,
+                recovery_count: 0,
+                last_fault_event_id: Some(fault.event_id),
+                last_recovery_at: None,
+                severity: DiagnosticSeverity::Error,
+                policy_revision: "1".into(),
+                last_seen_at: now(),
+                revision: 6,
+            }),
+            policy: policy(),
+            current_service_status: Status::PartialOutage,
+            now: now() + Duration::seconds(3),
+        })
+        .unwrap();
+        assert_eq!(stale.action, DiagnosticAction::RecordStaleRecovery);
+        assert_eq!(stale.occurrence_count, 8);
+        assert_eq!(stale.issue_state, IssueState::Active);
     }
 }
