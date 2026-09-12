@@ -11,6 +11,7 @@
   "scripts": {
     "test": "vitest run",
     "test:runtime": "vitest run tests/runtime",
+    "build:rust-runtime": "worker-build tests/rust-runtime --release --no-opt -- --locked",
     "build:wasm": "node scripts/build-wasm.mjs",
     "test:rust": "cargo test --workspace",
     "test:database": "python -m unittest discover -s tests/database -v",

@@ -17,3 +17,5 @@ pkg/
 coverage/
 __pycache__/
 *.pyc
+# Rust Worker 测试生成产物。 / Generated Rust Worker test artifacts.
+tests/rust-runtime/build/

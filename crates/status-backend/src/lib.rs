@@ -4,5 +4,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod access;
+pub mod auth;
 pub mod cursor;
 pub mod http;

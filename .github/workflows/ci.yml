@@ -59,6 +59,11 @@ jobs:
       - uses: ./.github/actions/setup-rust-wasm
       - name: Build Rust WASM bridge before imports and integration tests
         run: node scripts/build-wasm.mjs
+      # 迁移中的真实 Rust SDK 路径也必须在 workerd 中执行。 / Exercise the migrating Rust SDK path in actual workerd.
+      - name: Build Rust runtime acceptance Worker
+        run: |
+          cargo install worker-build --version 0.8.5 --locked
+          worker-build tests/rust-runtime --release --no-opt -- --locked
       - name: Check formatting
         run: pnpm format:check
       - name: Type-check every workspace

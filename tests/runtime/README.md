@@ -19,3 +19,17 @@ Coverage: empty platform unknown; no public admin/evidence routes; anonymous den
 
 边界：不证明真实 Cloudflare Access 配置、远端 D1、供应商遥测后端、地理独立区域、完整队列或部署产物字节生命周期。其他集成测试提供额外证据，而不是由此测试推断。
 Limits: this does not prove deployed Cloudflare Access configuration, remote D1, vendor telemetry backends, geographically independent regions, complete queue delivery, or deployment artifact byte lifecycle. Separate tests provide additional evidence; this suite must not be used to infer those guarantees.
+
+# Rust Workers 迁移验收 / Rust Workers migration acceptance
+
+`rust-auth.test.ts` 使用 `worker-build` 生成的真正 Rust Worker，直接执行 `status-backend` 的生产认证代码；测试专用入口不部署到生产。 / `rust-auth.test.ts` runs a real worker-build-generated Rust Worker against production status-backend authentication code; the test entrypoint is never deployed to production.
+
+```sh
+cargo install worker-build --version 0.8.5 --locked
+pnpm build:rust-runtime
+pnpm exec vitest run tests/runtime/rust-auth.test.ts
+```
+
+覆盖 RS256/ES256/Ed25519 实际验签、固定 JWKS 下载、缓存及未知 kid 冷却、Access 角色映射、JWT 拒绝路径和 Rust SDK 流式 JSON 上限。向量由 Node 独立签名，不 mock 认证结果；测试 TypeScript 只负责驱动 workerd，不承担后端业务。 / Covers real signature verification, pinned JWKS fetch/cache/cooldown, Access role mapping, JWT rejection, and Rust SDK streamed JSON limits. Node signs independently; authentication is not mocked. Test TypeScript drives workerd, not backend business logic.
+
+该测试不是全部 Rust 迁移完成的证据；公共路由、管理写入、调度、队列和产物操作仍需各自的实现与验收。 / This is not evidence of complete Rust migration; public routes, admin mutations, scheduling, queues and artifact operations require their own implementation and acceptance.
