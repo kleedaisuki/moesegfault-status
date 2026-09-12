@@ -72,7 +72,7 @@ beforeAll(async () => {
           },
           env: {
             ...common,
-            ADMIN_EMAIL: { type: "json", value: "redacted@example.invalid" },
+            ADMIN_EMAIL: { type: "json", value: "admin@example.test" },
             ADMIN_PASSWORD_RECORD: { type: "json", value: record },
             DB: { type: "d1", id: "admin-login-integration" },
           },
@@ -114,10 +114,13 @@ it("runs final Rust gateway → named AdminRpc → D1 login and revocation witho
     headers: { "cf-access-jwt-assertion": "forged" },
   });
   expect(forged.status).toBe(401);
+  expect(await forged.text()).not.toContain("admin@example.test");
   const rejected = await post("login", { password: password + "wrong" });
   expect(rejected.status).toBe(401);
   expect(rejected.headers.get("set-cookie")).toBeNull();
-  expect(await rejected.text()).not.toContain(password);
+  const rejectedBody = await rejected.text();
+  expect(rejectedBody).not.toContain(password);
+  expect(rejectedBody).not.toContain("admin@example.test");
 
   const login = await post("login", { password });
   expect(login.status).toBe(200);

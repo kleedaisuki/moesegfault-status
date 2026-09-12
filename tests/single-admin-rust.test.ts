@@ -58,7 +58,7 @@ beforeAll(async () => {
   };
   const env = {
     ENVIRONMENT: { type: "json" as const, value: "development" },
-    ADMIN_EMAIL: { type: "json" as const, value: "redacted@example.invalid" },
+    ADMIN_EMAIL: { type: "json" as const, value: "admin@example.test" },
     ADMIN_PASSWORD_RECORD: { type: "json" as const, value: record },
     DB: { type: "d1" as const, id: "single-admin-test" },
   };
@@ -90,6 +90,11 @@ beforeAll(async () => {
               worker: "missing",
               exportName: "AdminRpc",
             },
+            MISSING_IDENTITY: {
+              type: "worker",
+              worker: "missing-identity",
+              exportName: "AdminRpc",
+            },
             BOOTSTRAP: {
               type: "worker",
               worker: "bootstrap",
@@ -116,6 +121,14 @@ beforeAll(async () => {
           env: {
             ENVIRONMENT: env.ENVIRONMENT,
             ADMIN_EMAIL: env.ADMIN_EMAIL,
+            DB: env.DB,
+          },
+        },
+        {
+          name: "missing-identity",
+          env: {
+            ENVIRONMENT: env.ENVIRONMENT,
+            ADMIN_PASSWORD_RECORD: env.ADMIN_PASSWORD_RECORD,
             DB: env.DB,
           },
         },
@@ -152,6 +165,40 @@ afterAll(async () => {
   await mf?.dispose();
 });
 describe("Rust single-administrator native WebCrypto and D1", () => {
+  it("keeps the administrator identity out of public configuration", async () => {
+    const config = await readFile("wrangler.jsonc", "utf8");
+    const vars = config.slice(
+      config.indexOf('"vars":'),
+      config.indexOf('"secrets":'),
+    );
+    expect(vars).not.toContain("ADMIN_EMAIL");
+    expect(config.slice(config.indexOf('"secrets":'))).toContain(
+      '"ADMIN_EMAIL"',
+    );
+    const source = await readFile(
+      "crates/status-backend/src/admin_auth/platform.rs",
+      "utf8",
+    );
+    expect(source).toContain('env.secret("ADMIN_EMAIL")');
+    expect(source).not.toContain('env.var("ADMIN_EMAIL")');
+  });
+  it("fails closed without an identity and never returns identity on failed authentication", async () => {
+    await reset();
+    const missing = await call(
+      "loginAdministrator",
+      { password },
+      "MISSING_IDENTITY",
+    );
+    expect(missing.problem.status).toBe(503);
+    const wrong = await call("loginAdministrator", {
+      password: password + "wrong",
+    });
+    expect(wrong.problem.status).toBe(401);
+    for (const result of [missing, wrong]) {
+      expect(JSON.stringify(result)).not.toContain("admin@example.test");
+      expect(result).not.toHaveProperty("data.principal");
+    }
+  });
   it("has no setup/change capability and default has no login", async () => {
     expect(await call("initializeAdministrator", {})).toEqual({
       transport: 404,
@@ -196,7 +243,7 @@ describe("Rust single-administrator native WebCrypto and D1", () => {
     expect(result.data.session_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(result.data.principal).toMatchObject({
       subject: "single-admin",
-      email: "redacted@example.invalid",
+      email: "admin@example.test",
       roles: ["admin"],
       access_application: "single-admin-password",
     });

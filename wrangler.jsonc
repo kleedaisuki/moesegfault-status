@@ -29,9 +29,6 @@
     "MACHINE_ISSUER": "https://status.moesegfault.dev",
     "MACHINE_AUDIENCE": "moesegfault-status",
     "MACHINE_JWKS_URL": "https://status.moesegfault.dev/.well-known/jwks.json",
-    // 唯一管理员标识来自已核验的账户，不允许浏览器提供角色或主体。
-    // The sole administrator comes from the verified account; browsers never supply roles or subjects.
-    "ADMIN_EMAIL": "redacted@example.invalid",
     "R2_ACCOUNT_ID": "07109e406d4e1ab7a0997dd399db6fd5",
     "R2_BUCKET_NAME": "moesegfault-observability",
     // 空映射不产生区域证据；部署时绑定私有默认 fetch 执行器。 / An empty map produces no regional evidence; bind private default-fetch executors for deployment.
@@ -46,6 +43,7 @@
   "secrets": {
     "required": [
       "ADMIN_PASSWORD_RECORD",
+      "ADMIN_EMAIL",
       "CURSOR_SIGNING_KEY",
       "R2_ACCESS_KEY_ID",
       "R2_SECRET_ACCESS_KEY",

@@ -50,7 +50,8 @@ async fn execute(db: &Database, operation: &str, raw: &Value, env: &Env) -> Resu
             return Err(400);
         }
     }
-    let email = env.var("ADMIN_EMAIL").map_err(|_| 503u16)?.to_string();
+    // 私有审计标识只来自平台 Secret，不作为公开配置或登录输入。 / Private audit identity comes only from a platform Secret, never public configuration or login input.
+    let email = env.secret("ADMIN_EMAIL").map_err(|_| 503u16)?.to_string();
     if email.len() > 320 || !crate::admin::valid_email(&email) {
         return Err(503);
     }
