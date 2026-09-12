@@ -4,11 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "wrangler deploy --dry-run"
-  },
-  "dependencies": {
-    "@moesegfault/contracts": "workspace:*",
-    "@moesegfault/telemetry": "workspace:*"
+    "build": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "dev": "wrangler dev --config wrangler.jsonc"
   }
 }

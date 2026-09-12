@@ -46,10 +46,10 @@ jobs:
             echo "::notice::Base revision has no OpenAPI artifact; this pull request establishes the compatibility baseline."
           fi
 
-  typescript:
-    name: TypeScript, WASM, Workers and Ops
+  runtime:
+    name: Rust Workers, real workerd and frontend
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -57,39 +57,29 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/setup-js
       - uses: ./.github/actions/setup-rust-wasm
-      - name: Build Rust WASM bridge before imports and integration tests
-        run: node scripts/build-wasm.mjs
-      # 迁移中的真实 Rust SDK 路径也必须在 workerd 中执行。 / Exercise the migrating Rust SDK path in actual workerd.
-      - name: Build Rust runtime acceptance Worker
+      - name: Install pinned Workers Rust build tool
+        run: cargo install worker-build --version 0.8.5 --locked
+      # 生产字节先构建后审核；Wrangler不包含build钩子。 / Build and review production bytes first; Wrangler has no build hook.
+      - name: Build all Rust production Workers and debug artifacts
+        run: pnpm build:backend
+      # 普通原生测试跳过的真实产物审核必须在构建之后执行。 / Run real artifact audits that ordinary native tests skip after assembly.
+      - name: Audit real release inventories and frozen deployment snapshots
         run: |
-          cargo install worker-build --version 0.8.5 --locked
-          worker-build tests/rust-runtime --release --no-opt -- --locked
-      - name: Check formatting
+          cargo test --locked -p status-build -- --include-ignored
+          cargo test --locked -p status-release -- --include-ignored
+      - name: Build real Rust runtime acceptance driver
+        run: pnpm build:rust-runtime
+      - name: Check source formatting
         run: pnpm format:check
-      - name: Type-check every workspace
+      - name: Type-check frontend and wire contracts only
         run: pnpm typecheck
-      - name: Type-check release tooling
-        run: >-
-          pnpm exec tsc --noEmit --module NodeNext --moduleResolution NodeNext
-          --target ES2024 --types node scripts/release/provenance.ts
-          scripts/release/deploy.ts scripts/release/openapi-gate.ts
-      - name: Run TypeScript tests
+      # TS只作为浏览器代码和测试驱动；业务执行路径是Rust/WASM。 / TypeScript is browser code and test drivers; business execution is Rust/WASM.
+      - name: Run frontend, contracts and actual workerd acceptance tests
         run: pnpm test
-      - name: Run release safety tests
-        run: pnpm release:test
-      - name: Check contract and telemetry packages
-        run: |
-          pnpm --filter @moesegfault/contracts build
-          pnpm --filter @moesegfault/telemetry build
-      - name: Dry-run status Worker deployment
-        run: pnpm --filter @moesegfault/status build
-      - name: Dry-run operations gateway deployment
-        run: pnpm --filter @moesegfault/ops-gateway build
-      - name: Dry-run regional probe executor deployment
-        run: pnpm --filter @moesegfault/probe-executor build
-      - name: Build operations UI with Vite
-        run: pnpm --filter @moesegfault/ops build
-
+      - name: Validate prebuilt status, gateway and regional Worker uploads offline
+        run: pnpm deploy:check
+      - name: Build operations UI
+        run: pnpm build:frontend
   database:
     name: SQL schema tests
     runs-on: ubuntu-24.04
@@ -104,17 +94,31 @@ jobs:
         with:
           python-version: "3.13"
       - name: Test migrations and SQL invariants
-        run: python -m unittest discover -s tests/database -v
+        run: |
+          python - <<'PY'
+          import pathlib, unittest
+          suite = unittest.TestSuite()
+          for path in sorted(pathlib.Path("tests/database").glob("test_*.py")):
+              if path.name != "test_scheduling_rust_reevaluate.py":
+                  suite.addTests(unittest.defaultTestLoader.discover("tests/database", pattern=path.name))
+          raise SystemExit(not unittest.TextTestRunner(verbosity=2).run(suite).wasSuccessful())
+          PY
+          python crates/status-backend/src/deployments/test_sql.py
+          for file in crates/status-backend/src/admin/mutations/native/*.py; do python "$file"; done
 
   rust:
     name: Native Rust
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 25
     steps:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install Python for the native-source harness
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
       - name: Install stable Rust from rustup
         run: |
           rustup set profile minimal
@@ -126,6 +130,11 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Run native tests
         run: cargo test --locked --workspace
+      # 离线harness依赖上一步已缓存Cargo依赖，不依赖runner偶然预装环境。 / The offline harness uses Cargo dependencies cached by the preceding native tests.
+      - name: Run native harness for Wasm-only reevaluation and lifecycle source
+        run: python -m unittest discover -s tests/database -p test_scheduling_rust_reevaluate.py -v
       # 验证 Rust 平台代码，而非仅原生纯函数。 / Check Rust platform code, not just native pure functions.
       - name: Check Rust backend against Workers WASM target
-        run: cargo clippy --locked -p status-backend --target wasm32-unknown-unknown -- -D warnings
+        run: >-
+          cargo clippy --locked -p status-backend -p status-worker -p admin-rpc-worker
+          -p ops-gateway-worker -p probe-worker -p diagnostic-client --target wasm32-unknown-unknown -- -D warnings

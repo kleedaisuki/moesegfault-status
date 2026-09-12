@@ -1,6 +1,6 @@
 # 纯领域核心可同时在原生测试和 Workers WASM 中运行。 / Pure core runs in native tests and Workers WASM.
 [workspace]
-members = ["crates/status-domain", "crates/status-backend", "tests/rust-runtime"]
+members = ["crates/status-domain", "crates/status-backend", "crates/status-worker", "crates/status-build", "crates/admin-rpc-worker", "crates/probe-worker", "crates/ops-gateway-worker", "crates/status-release", "crates/diagnostic-client", "tests/rust-runtime", "tests/telemetry-runtime", "tests/scheduling-runtime", "tests/diagnostic-client-runtime"]
 resolver = "3"
 
 [profile.release]

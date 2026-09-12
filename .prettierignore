@@ -3,7 +3,8 @@ target
 .wrangler
 dist
 pkg
-tests/rust-runtime/build
+tests/*-runtime/build
+crates/*/build
 pnpm-lock.yaml
 Cargo.lock
 **/worker-configuration.d.ts

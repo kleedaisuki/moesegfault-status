@@ -1,6 +1,7 @@
 //! Rust 公共只读 API；响应仅投影公开字段。 / Rust public read-only API; project public fields only.
 
 mod incidents;
+mod instrumentation;
 mod maintenance;
 mod status;
 mod validation;
@@ -25,6 +26,8 @@ const NOT_FOUND: HttpError =
 /// 单次调用的公开读上下文；密钥和数据库不跨请求存储。
 /// Invocation-local public read context; secrets and database bindings are not retained across requests.
 pub struct PublicContext<'a> {
+    /// 入口创建的共享遥测门面；None 仅表示未配置，不重置预算。 / Entry-created shared telemetry facade; None means unconfigured, never a budget reset.
+    pub telemetry: Option<&'a crate::telemetry::Telemetry>,
     /// D1 权威来源。 / Authoritative D1 source.
     pub db: &'a Database,
     /// 游标签名密钥。 / Cursor signing secret.
@@ -36,7 +39,12 @@ pub struct PublicContext<'a> {
 }
 
 impl PublicContext<'_> {
-    /// JWT/游标协议使用整秒，不影响查询时间精度。 / Cursor wire uses whole seconds without reducing query time precision.
+    /// 记录静态字段类别并保持原有安全错误。 / Record static field categories while preserving the existing safe error.
+    fn invalid_field(&self, field: &'static str) -> HttpError {
+        instrumentation::invalid_field(self.telemetry, field, self.correlation_id);
+        INTERNAL
+    }
+    /// JWT/游标协议使用整秒。 / Cursor protocol uses whole seconds.
     fn now_seconds(&self) -> i64 {
         self.now_millis.div_euclid(1000)
     }

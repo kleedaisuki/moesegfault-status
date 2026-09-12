@@ -144,7 +144,9 @@ impl DiagnosticEvent {
         if self.schema_version != "1.0"
             || self.service_name.trim().is_empty()
             || self.summary.trim().is_empty()
-            || self.summary.len() > 512
+            // Match the public text contract rather than counting UTF-8 bytes.
+            // 与公开文本契约一致，不把中文的 UTF-8 多字节编码当作额外字符。
+            || self.summary.encode_utf16().count() > 512
             || !valid_dotted_name(&self.kind)
         {
             return Err(DomainError::Validation(
@@ -591,6 +593,21 @@ mod tests {
             fingerprint: json!({"dependency":"d1"}),
             evidence: vec![],
             attributes: BTreeMap::new(),
+        }
+    }
+
+    /// 浏览器契约按 UTF-16 单元计数；中文与代理对必须保持相同边界。
+    /// Browser contracts count UTF-16 units; CJK text and surrogate pairs must retain the same boundary.
+    #[test]
+    fn summary_length_matches_utf16_wire_contract() {
+        let mut input = event();
+        for valid in ["中".repeat(512), "🦀".repeat(256)] {
+            input.summary = valid;
+            assert!(input.validate().is_ok());
+        }
+        for invalid in ["中".repeat(513), "🦀".repeat(257)] {
+            input.summary = invalid;
+            assert!(input.validate().is_err());
         }
     }
 

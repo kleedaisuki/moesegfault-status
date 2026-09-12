@@ -77,6 +77,12 @@ pub enum DatabaseError {
     /// 平台执行失败。 / Platform execution failure.
     #[error("Database operation failed")]
     Execution,
+    /// 已知数据库约束冲突。 / Known database constraint conflict.
+    #[error("Database constraint conflict")]
+    Constraint,
+    /// 临时平台或网络不可用。 / Temporary platform or network unavailability.
+    #[error("Database temporarily unavailable")]
+    Unavailable,
     /// 返回行不符合期望类型。 / Returned rows do not match the expected type.
     #[error("Database result violates the row contract")]
     RowContract,
@@ -142,13 +148,8 @@ mod platform {
             let statement = self.prepare(query)?;
             // SDK 0.8.5 results<T>() 内部 unwrap；使用同一官方 binding 的可失败解码。
             // SDK 0.8.5 results<T>() unwraps internally; decode the same official binding fallibly instead.
-            let promise = statement
-                .inner()
-                .all()
-                .map_err(|_| DatabaseError::Execution)?;
-            let raw = JsFuture::from(promise)
-                .await
-                .map_err(|_| DatabaseError::Execution)?;
+            let promise = statement.inner().all().map_err(classify_error)?;
+            let raw = JsFuture::from(promise).await.map_err(classify_error)?;
             let result: QueryResult<T> =
                 serde_wasm_bindgen::from_value(raw).map_err(|_| DatabaseError::RowContract)?;
             if !result.success {
@@ -182,12 +183,8 @@ mod platform {
                 statements.push(self.prepare(query)?.inner().as_ref());
             }
             let binding: &worker_sys::types::D1Database = self.binding.as_ref().unchecked_ref();
-            let promise = binding
-                .batch(statements)
-                .map_err(|_| DatabaseError::Execution)?;
-            let raw = JsFuture::from(promise)
-                .await
-                .map_err(|_| DatabaseError::Execution)?;
+            let promise = binding.batch(statements).map_err(classify_error)?;
+            let raw = JsFuture::from(promise).await.map_err(classify_error)?;
             let results: Vec<QueryResult<serde_json::Value>> =
                 serde_wasm_bindgen::from_value(raw).map_err(|_| DatabaseError::RowContract)?;
             if results.len() != queries.len() || results.iter().any(|r| !r.success) {
@@ -208,6 +205,47 @@ mod platform {
                 .bind(&values)
                 .map_err(|_| DatabaseError::InvalidParameter)
         }
+    }
+
+    /// Classify fixed platform error categories without exposing SQL or parameters.
+    /// 仅分类固定平台错误，不暴露 SQL 或参数。
+    fn classify_error(error: JsValue) -> DatabaseError {
+        let mut current = error;
+        let mut messages = String::new();
+        for _ in 0..3 {
+            if let Some(message) = current.as_string() {
+                messages.push_str(&message);
+            }
+            if let Ok(message) = js_sys::Reflect::get(&current, &"message".into()) {
+                if let Some(message) = message.as_string() {
+                    messages.push_str(&message);
+                }
+            }
+            let Ok(cause) = js_sys::Reflect::get(&current, &"cause".into()) else {
+                break;
+            };
+            if cause.is_null() || cause.is_undefined() {
+                break;
+            }
+            current = cause;
+        }
+        let message = messages.to_ascii_lowercase();
+        if message.contains("sqlite_constraint") || message.contains("constraint failed") {
+            return DatabaseError::Constraint;
+        }
+        if [
+            "temporarily unavailable",
+            "networkerror",
+            "fetch failed",
+            "overloaded",
+            "rate limit",
+        ]
+        .iter()
+        .any(|kind| message.contains(kind))
+        {
+            return DatabaseError::Unavailable;
+        }
+        DatabaseError::Execution
     }
 
     /// SQLite bool 用整数表达；BLOB 不转成字符串。 / Represent SQLite booleans as integers; never stringify BLOBs.

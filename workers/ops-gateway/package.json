@@ -4,14 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "wrangler deploy --dry-run --outdir dist",
-    "test": "vitest run",
-    "types": "wrangler types workers/ops-gateway/worker-configuration.d.ts --cwd ../.. -c workers/ops-gateway/wrangler.jsonc -c wrangler.jsonc"
-  },
-  "dependencies": {
-    "@moesegfault/contracts": "workspace:*",
-    "@moesegfault/telemetry": "workspace:*",
-    "jose": "6.2.12"
+    "build": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "dev": "wrangler dev --config wrangler.jsonc"
   }
 }

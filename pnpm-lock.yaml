@@ -222,74 +222,11 @@ importers:
         specifier: ^4.1.8
         version: 4.6.2
 
-  packages/diagnostic-client:
-    dependencies:
-      '@moesegfault/contracts':
-        specifier: workspace:*
-        version: link:../contracts
-      '@moesegfault/telemetry':
-        specifier: workspace:*
-        version: link:../telemetry
-    devDependencies:
-      typescript:
-        specifier: 7.0.2
-        version: 7.0.2
-      vitest:
-        specifier: 5.0.0
-        version: 5.0.0(@types/node@24.13.4)(happy-dom@18.0.1)(vite@7.3.6(@types/node@24.13.4)(tsx@4.23.13))
+  workers/ops-gateway: {}
 
-  packages/domain-wasm: {}
+  workers/probe-executor: {}
 
-  packages/telemetry:
-    devDependencies:
-      typescript:
-        specifier: 7.0.2
-        version: 7.0.2
-      vitest:
-        specifier: 5.0.0
-        version: 5.0.0(@types/node@24.13.4)(happy-dom@18.0.1)(vite@7.3.6(@types/node@24.13.4)(tsx@4.23.13))
-
-  workers/ops-gateway:
-    dependencies:
-      '@moesegfault/contracts':
-        specifier: workspace:*
-        version: link:../../packages/contracts
-      '@moesegfault/telemetry':
-        specifier: workspace:*
-        version: link:../../packages/telemetry
-      jose:
-        specifier: 6.2.12
-        version: 6.2.12
-
-  workers/probe-executor:
-    dependencies:
-      '@moesegfault/contracts':
-        specifier: workspace:*
-        version: link:../../packages/contracts
-      '@moesegfault/telemetry':
-        specifier: workspace:*
-        version: link:../../packages/telemetry
-
-  workers/status:
-    dependencies:
-      '@moesegfault/contracts':
-        specifier: workspace:*
-        version: link:../../packages/contracts
-      '@moesegfault/domain-wasm':
-        specifier: workspace:*
-        version: link:../../packages/domain-wasm
-      '@moesegfault/telemetry':
-        specifier: workspace:*
-        version: link:../../packages/telemetry
-      aws4fetch:
-        specifier: ^1.0.20
-        version: 1.0.20
-      jose:
-        specifier: 6.2.12
-        version: 6.2.12
-      zod:
-        specifier: ^4.6.2
-        version: 4.6.2
+  workers/status: {}
 
 packages:
 
@@ -1155,9 +1092,6 @@ packages:
     resolution: {integrity: sha512-Izi8RQcffqCeNVgFigKli1ssklIbpHnCYc6AknXGYoB6grJqyeby7jv12JUQgmTAnIDnbck1uxksT4dzN3PWBA==}
     engines: {node: '>=12'}
 
-  aws4fetch@1.0.20:
-    resolution: {integrity: sha512-/djoAN709iY65ETD6LKCtyyEI04XIBP5xVvfmNxsEP0uJB5tyaGBztSryRr4HqMStr9R06PisQE7m9zDTXKu6g==}
-
   blake3-wasm@2.1.5:
     resolution: {integrity: sha512-F1+K8EbfOZE49dtoPtmxUQrpXaBIl3ICvasLh+nJta0xkz+9kF/7uet9fLnwKqhDrmj6g+6K3Tw9yQPUg2ka5g==}
 
@@ -1213,9 +1147,6 @@ packages:
   happy-dom@18.0.1:
     resolution: {integrity: sha512-qn+rKOW7KWpVTtgIUi6RVmTBZJSe2k0Db0vh1f7CWrWclkkc7/Q+FrOfkZIb2eiErLyqu5AXEzE7XthO9JVxRA==}
     engines: {node: '>=20.0.0'}
-
-  jose@6.2.12:
-    resolution: {integrity: sha512-9NiFmJEex0sy2Dk58j2UGBSHgUs2ypF9eZSu4L6vjOX3Dp96Sw1F3uL+H+D1sx02jZZdzUT0HgvCy59CuvXcWw==}
 
   kleur@4.1.5:
     resolution: {integrity: sha512-o+NO+8WrRiQEE4/7nwRJhN1HWpVmJm511pBHUxPLtp0BUISzlBplORYSmTclCnJvQq2tKu/sgl3xVpkc7ZWuQQ==}
@@ -1959,8 +1890,6 @@ snapshots:
 
   assertion-error@2.0.1: {}
 
-  aws4fetch@1.0.20: {}
-
   blake3-wasm@2.1.5: {}
 
   chai@6.2.2: {}
@@ -2049,8 +1978,6 @@ snapshots:
       '@types/node': 20.19.43
       '@types/whatwg-mimetype': 3.0.2
       whatwg-mimetype: 3.0.0
-
-  jose@6.2.12: {}
 
   kleur@4.1.5: {}
 

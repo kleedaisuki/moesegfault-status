@@ -1,7 +1,17 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "moesegfault-probe-asia",
-  "main": "src/index.ts",
+  "main": "../../dist/rust/probe/probe.js",
+  // 只部署预构建的Rust执行器，不附加TypeScript业务层。 / Deploy the prebuilt Rust executor without a TypeScript business layer.
+  "no_bundle": true,
+  "find_additional_modules": true,
+  "preserve_file_names": true,
+  "upload_source_maps": true,
+  "rules": [
+    { "type": "ESModule", "globs": ["**/*.js"], "fallthrough": false },
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+  ],
+  "account_id": "07109e406d4e1ab7a0997dd399db6fd5",
   "compatibility_date": "2026-09-12",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,

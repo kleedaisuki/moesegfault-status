@@ -1,0 +1,17 @@
+[package]
+name = "probe-worker"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+status-backend = { path = "../status-backend" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+worker = "=0.8.5"
+
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+dwarf-debug-info = true

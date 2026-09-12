@@ -1,0 +1,14 @@
+[package]
+name = "ops-gateway-worker"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+status-backend = { path = "../status-backend" }
+worker = { version = "=0.8.5" }
+[package.metadata.wasm-pack.profile.release.wasm-bindgen]
+dwarf-debug-info = true

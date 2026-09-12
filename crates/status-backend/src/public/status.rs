@@ -41,9 +41,20 @@ struct Row {
     fresh_until: Option<String>,
     /// 无证明时的目录更新时间。 / Catalog update fallback without evidence.
     fallback_at: String,
+    /// 原始证明期限缺失不能被投影 fallback 掩盖。 / Projection fallback must not conceal a missing original evidence deadline.
+    #[serde(skip)]
+    missing_deadline: bool,
     /// 组件显示顺序。 / Component display order.
     #[serde(default)]
     sort_order: i64,
+}
+
+/// 解码时保留缺失证据事实，后续目录投影不能把它变成有效证明。 / Preserve missing-evidence facts at decode time before catalog projection.
+fn decode_row(payload: &str, context: &PublicContext<'_>) -> Result<Row, HttpError> {
+    let mut row: Row =
+        serde_json::from_str(payload).map_err(|_| context.invalid_field("snapshot_row"))?;
+    row.missing_deadline = row.fresh_until.is_none();
+    Ok(row)
 }
 
 /// 与 direct_status 分离的公开风险状态。 / Public risk state, distinct from direct_status.
@@ -105,23 +116,21 @@ async fn snapshot(context: &PublicContext<'_>) -> Result<Snapshot, HttpError> {
     let mut support = BTreeMap::<String, Vec<String>>::new();
     for record in records {
         match record.kind.as_str() {
-            "service" => {
-                services.push(serde_json::from_str(&record.payload).map_err(|_| INTERNAL)?)
-            }
-            "component" => {
-                components.push(serde_json::from_str(&record.payload).map_err(|_| INTERNAL)?)
-            }
-            "dependency" => graph
-                .dependencies
-                .push(serde_json::from_str(&record.payload).map_err(|_| INTERNAL)?),
+            "service" => services.push(decode_row(&record.payload, context)?),
+            "component" => components.push(decode_row(&record.payload, context)?),
+            "dependency" => graph.dependencies.push(
+                serde_json::from_str(&record.payload)
+                    .map_err(|_| context.invalid_field("snapshot_row"))?,
+            ),
             "support" => {
-                let row: Support = serde_json::from_str(&record.payload).map_err(|_| INTERNAL)?;
+                let row: Support = serde_json::from_str(&record.payload)
+                    .map_err(|_| context.invalid_field("snapshot_row"))?;
                 support
                     .entry(row.component_id)
                     .or_default()
                     .push(row.service_name);
             }
-            _ => return Err(INTERNAL),
+            _ => return Err(context.invalid_field("snapshot_kind")),
         }
     }
     services.sort_by(|a, b| a.service_name.cmp(&b.service_name));
@@ -163,6 +172,7 @@ async fn snapshot(context: &PublicContext<'_>) -> Result<Snapshot, HttpError> {
         ));
     }
     project_components(&mut components, &services, &support, context.now_millis);
+    record_freshness(context, components.iter(), "components");
     let mut by_service: BTreeMap<String, Vec<Value>> = services
         .iter()
         .map(|row| (row.service_name.clone(), Vec::new()))
@@ -179,7 +189,7 @@ async fn snapshot(context: &PublicContext<'_>) -> Result<Snapshot, HttpError> {
             .collect();
         for name in names {
             if let Some(values) = by_service.get_mut(name) {
-                values.push(component(row, context.now_millis)?);
+                values.push(component(row, context)?);
             }
         }
     }
@@ -348,26 +358,60 @@ fn effective(direct: Status, risk: RiskStatus) -> Status {
 }
 
 /// 验证公开输出后序列化组件。 / Validate public output before serializing a component.
-fn component(row: &Row, now: i64) -> Result<Value, HttpError> {
-    if !text(&row.target_id, 1, 128) || !text(&row.display_name, 1, 128) {
-        return Err(INTERNAL);
+fn component(row: &Row, context: &PublicContext<'_>) -> Result<Value, HttpError> {
+    if !text(&row.target_id, 1, 128) {
+        return Err(context.invalid_field("component_id"));
+    }
+    if !text(&row.display_name, 1, 128) {
+        return Err(context.invalid_field("display_name"));
     }
     Ok(
-        json!({"id":row.target_id,"display_name":row.display_name,"status":fresh(row.effective_impact.or(row.direct_status),row.fresh_until.as_deref(),now)}),
+        json!({"id":row.target_id,"display_name":row.display_name,"status":fresh(row.effective_impact.or(row.direct_status),row.fresh_until.as_deref(),context.now_millis)}),
     )
 }
 
 /// 验证服务输出的字符串和时间约束。 / Validate service output string and timestamp constraints.
-fn validate_service(row: &Row) -> Result<(), HttpError> {
-    if !service_name(&row.service_name)
-        || !text(&row.display_name, 1, 128)
-        || !text(&row.description, 0, 1024)
-        || !timestamp(row.evaluated_at.as_deref().unwrap_or(&row.fallback_at))
-        || !timestamp(row.fresh_until.as_deref().unwrap_or(&row.fallback_at))
-    {
-        return Err(INTERNAL);
+fn validate_service(row: &Row, context: &PublicContext<'_>) -> Result<(), HttpError> {
+    for (field, valid) in [
+        ("service_name", service_name(&row.service_name)),
+        ("display_name", text(&row.display_name, 1, 128)),
+        ("description", text(&row.description, 0, 1024)),
+        (
+            "evaluated_at",
+            timestamp(row.evaluated_at.as_deref().unwrap_or(&row.fallback_at)),
+        ),
+        (
+            "fresh_until",
+            timestamp(row.fresh_until.as_deref().unwrap_or(&row.fallback_at)),
+        ),
+    ] {
+        if !valid {
+            return Err(context.invalid_field(field));
+        }
     }
     Ok(())
+}
+/// 只观察当前返回的投影，不把目录时间冒充评估。 / Observe returned projections without treating catalog timestamps as evaluations.
+fn record_freshness<'a>(
+    context: &PublicContext<'_>,
+    rows: impl IntoIterator<Item = &'a Row>,
+    operation: &'static str,
+) {
+    super::instrumentation::freshness(
+        context.telemetry,
+        rows.into_iter().map(|r| {
+            (
+                r.evaluated_at.as_deref(),
+                if r.missing_deadline {
+                    None
+                } else {
+                    r.fresh_until.as_deref()
+                },
+            )
+        }),
+        context.now_millis,
+        operation,
+    );
 }
 
 /// 平台整体公开状态。 / Public platform status.
@@ -388,10 +432,11 @@ pub(super) async fn platform(url: &Url, context: &PublicContext<'_>) -> Result<V
         ))
         .await
         .map_err(|_| INTERNAL)?;
+    record_freshness(context, snapshot.components.iter(), "platform");
     let components = snapshot
         .components
         .iter()
-        .map(|row| component(row, context.now_millis))
+        .map(|row| component(row, context))
         .collect::<Result<Vec<_>, _>>()?;
     let states = snapshot
         .components
@@ -420,7 +465,7 @@ pub(super) async fn platform(url: &Url, context: &PublicContext<'_>) -> Result<V
         .min()
         .unwrap_or(&now);
     if !timestamp(evaluated) || !timestamp(deadline) {
-        return Err(INTERNAL);
+        return Err(context.invalid_field("snapshot_timestamp"));
     }
     Ok(
         json!({"data":{"status":aggregate(&states),"evaluated_at":evaluated,"fresh_until":deadline,"active_incident_count":count.map_or(0,|c|c.count),"components":components},"links":{"self":self_link(url)}}),
@@ -468,9 +513,10 @@ pub(super) async fn list(url: &Url, context: &PublicContext<'_>) -> Result<Value
         .collect();
     let more = rows.len() > limit;
     let rows = &rows[..rows.len().min(limit)];
+    record_freshness(context, rows.iter().copied(), "services");
     let mut data = Vec::new();
     for row in rows {
-        validate_service(row)?;
+        validate_service(row, context)?;
         data.push(json!({"service_name":row.service_name,"display_name":row.display_name,"description":if row.description.is_empty(){None}else{Some(&row.description)},"status":fresh(row.effective_impact,row.fresh_until.as_deref(),context.now_millis),"evaluated_at":row.evaluated_at.as_deref().unwrap_or(&row.fallback_at),"fresh_until":row.fresh_until.as_deref().unwrap_or(&row.fallback_at),"components":snapshot.by_service[&row.service_name]}));
     }
     let next = match rows.last().filter(|_| more) {
@@ -510,7 +556,8 @@ pub(super) async fn detail(
             "not-found",
             "The public service does not exist.",
         ))?;
-    validate_service(row)?;
+    record_freshness(context, std::iter::once(row), "service");
+    validate_service(row, context)?;
     #[derive(Deserialize)]
     struct Incident {
         incident_id: String,

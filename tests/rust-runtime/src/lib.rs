@@ -14,10 +14,19 @@ use worker::*;
 /// 此入口不部署到生产；不替代任何业务接口。 / Never deploy this entrypoint to production; it replaces no business API.
 #[event(fetch)]
 pub async fn fetch(mut request: Request, env: Env, _ctx: Context) -> Result<Response> {
+    if let Some(response) = status_backend::deployments::handle(&mut request, &env, &_ctx).await? {
+        return Ok(response);
+    }
+    if request.path() == "/__test/diagnostics" && request.method() == Method::Post {
+        let value = request.json::<serde_json::Value>().await?;
+        let processed = status_backend::diagnostics::process_envelope(&env, value).await?;
+        return Response::from_json(&serde_json::json!({"processed": processed}));
+    }
     if request.path().starts_with("/v1/") {
         let db = status_backend::database::Database::new(env.d1("DB")?);
         let context = status_backend::public::PublicContext {
             db: &db,
+            telemetry: None,
             cursor_secret: "runtime-cursor-secret",
             correlation_id: "0199d0a8-2e12-7a59-a51e-000000000099",
             // 仅测试时钟注入；此驱动不部署。 / Test-only clock injection; this driver is never deployed.

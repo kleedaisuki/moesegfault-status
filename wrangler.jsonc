@@ -1,16 +1,26 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  // TypeScript 适配平台，Rust WASM 负责领域规则。 / TypeScript adapts the platform; Rust WASM owns domain rules.
+  // Rust 业务与生成的平台胶水；部署时绝不重新构建。 / Rust business code and generated platform glue; never rebuild during deployment.
   "name": "moesegfault-status",
-  "main": "workers/status/src/index.ts",
+  "main": "dist/rust/status/status.js",
   "account_id": "07109e406d4e1ab7a0997dd399db6fd5",
   "compatibility_date": "2026-09-12",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
-  "build": { "command": "node scripts/build-wasm.mjs" },
+  // 只上传审核后的预构建字节；两个Rust模块通过声明式入口导出。 / Upload reviewed prebuilt bytes; a declarative entry exports both Rust modules.
+  "no_bundle": true,
+  "find_additional_modules": true,
+  "preserve_file_names": true,
+  "upload_source_maps": true,
+  "rules": [
+    { "type": "ESModule", "globs": ["**/*.js"], "fallthrough": false },
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+  ],
   "vars": {
     "ENVIRONMENT": "development",
+    // 仅账户授权操作员显式打开首次控制平面引导，机器JWT仍必需。 / Only an account-authorized operator enables bootstrap; machine JWT remains required.
+    "BOOTSTRAP_MODE": "false",
     "STATUS_VERSION": "0.1.0",
     // 发布脚本必须填入已注册 manifest 的真实值。 / Release must inject actual registered manifest values.
     "DEPLOYMENT_ID": "",
@@ -25,7 +35,9 @@
     "PROBE_REGIONAL_CONFIG": "{}",
     // 后端端点与凭据分离；空表明确禁用查询。 / Separate endpoints from credentials; an empty map disables queries.
     "TELEMETRY_BACKEND_CONFIG_JSON": "{}",
+    "DIAGNOSTIC_QUEUE_NAME": "moesegfault-status-diagnostics",
     "NOTIFICATION_QUEUE_NAME": "moesegfault-status-notifications",
+    "NOTIFICATION_MAX_ATTEMPTS": "5",
   },
   // 缺少秘密时失败关闭；不得在文件中放入值。 / Fail closed without secrets; never put secret values in this file.
   "secrets": {
@@ -40,6 +52,10 @@
   },
   "queues": {
     "producers": [
+      {
+        "binding": "NOTIFICATION_DLQ",
+        "queue": "moesegfault-status-notifications-dlq",
+      },
       {
         "binding": "NOTIFICATION_QUEUE",
         "queue": "moesegfault-status-notifications",
@@ -58,7 +74,8 @@
         "queue": "moesegfault-status-notifications",
         "max_batch_size": 10,
         "max_batch_timeout": 5,
-        "max_retries": 8,
+        // 首次尝试 + 4次重试 = 5次总尝试。 / Initial attempt plus 4 retries equals 5 total attempts.
+        "max_retries": 4,
         "dead_letter_queue": "moesegfault-status-notifications-dlq",
       },
       {

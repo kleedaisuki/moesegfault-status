@@ -1,7 +1,20 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "moesegfault-ops-gateway",
-  "main": "src/index.ts",
+  "main": "../../dist/rust/ops/ops.js",
+  // 只部署Rust构建工具生成并审核的字节。 / Deploy only reviewed bytes produced by the Rust build tool.
+  "no_bundle": true,
+  "find_additional_modules": true,
+  "preserve_file_names": true,
+  "upload_source_maps": true,
+  "rules": [
+    { "type": "ESModule", "globs": ["**/*.js"], "fallthrough": false },
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+  ],
+  "account_id": "07109e406d4e1ab7a0997dd399db6fd5",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
   "compatibility_date": "2026-09-12",
   "vars": {
     "ACCESS_ISSUER": "https://REPLACE-ME.cloudflareaccess.com",

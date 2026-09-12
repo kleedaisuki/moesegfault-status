@@ -9,7 +9,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-mod bridge;
 mod dependency;
 mod diagnostic;
 mod evaluation;
@@ -18,9 +17,6 @@ mod lifecycle;
 mod provenance;
 mod recovery;
 
-#[cfg(feature = "wasm")]
-pub use bridge::dispatch_json;
-pub use bridge::dispatch_json_native;
 pub use dependency::{
     compute_dependency_risk, Criticality, Dependency, DependencyContributor, DependencyGraph,
     DependencyKind, DependencyRisk,
@@ -61,7 +57,7 @@ pub enum DomainError {
     /// 请求使用过期的乐观并发版本。 / Request carries a stale optimistic-concurrency revision.
     #[error("revision conflict: {0}")]
     RevisionConflict(String),
-    /// JSON 桥收到无效负载。 / The JSON bridge received an invalid payload.
+    /// JSON 契约收到无效负载。 / The JSON wire contract received an invalid payload.
     #[error("invalid JSON payload: {0}")]
     Json(String),
 }
