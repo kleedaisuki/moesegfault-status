@@ -71,3 +71,7 @@ The route table is an allowlist; no client-supplied RPC method name is accepted.
 - [Cloudflare native OpenTelemetry export](https://developers.cloudflare.com/workers/observability/exporting-opentelemetry-data/)
 - [Cloudflare Workers best practices](https://developers.cloudflare.com/workers/best-practices/workers-best-practices/)
 - [RFC 9457: Problem Details for HTTP APIs](https://www.rfc-editor.org/rfc/rfc9457.html)
+
+## 部署执行边界 / Deployment execution boundary
+
+Ops gateway 与 UI 的应用版本只能由 GitHub Actions 上传/部署；本机可构建、测试、配置 DNS/Secrets/资源，但不能上传应用代码。早期本机上传仅为历史事实，后续包括 bootstrap 在内均已改为 Actions 流程。 / Only GitHub Actions uploads/deploys gateway/UI versions. Local build/test/configuration is allowed, but application upload is not. Early local uploads are historical; all subsequent deployment, including bootstrap, uses Actions.

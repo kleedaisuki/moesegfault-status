@@ -11,7 +11,7 @@
 - 公网新建 Correlation ID；认证后的内部调用保留可信执行标识。身份与执行上下文不得混同。 / Public ingress creates correlation IDs; authenticated internal execution propagates trusted identifiers separately from principals.
 - 机器 JWT 绑定单个 service、environment 和 deployment，并有稳定 jti 和最长 15 分钟有效期。配置固定 issuer/audience/JWKS，不接受 token 指定的密钥地址。 / Machine JWTs bind service, environment, deployment, jti, and a maximum 15-minute lifetime to pinned trust configuration.
 - 主动探测只声明实际执行位置，不在一个 Cron Worker 中伪造多个独立区域。配置中的区域观测不足必须得到 unknown。 / Probes report actual execution locations; missing regional quorum yields unknown rather than fabricated coverage.
-- R2 上传使用带校验和、元数据和不可覆盖条件的短期签名 URL；产物提交根据实际 R2 校验和验证，不把客户端元数据作为内容证明。 / Uploads use short-lived checksum-bound conditional URLs; commits verify actual object checksums.
+- R2 上传使用同源机器 JWT 认证 PUT 和原生 binding，64 MiB artifact/8 MiB source map、600 秒 session、四个精确请求头；取消 S3 凭据和预签名传输，但保留原子注册、条件写入、commit 摘要与 ready 门禁。 / Same-origin JWT-authenticated PUT uses native R2 bindings and bounded sessions/headers; it replaces S3 credentials without weakening registration, conditional writes, commit or readiness.
 
 ## 工程依据 / Engineering evidence
 
@@ -32,7 +32,7 @@
 | HTTP 与 RPC / Contracts | OpenAPI 生成一致性、严格输入、错误格式、路径白名单、认证/授权/CSRF、签名游标 / generated consistency, strict inputs, errors, route allowlists, authentication, authorization, CSRF, cursors |
 | 异步 / Async            | Queue 重复/乱序/延迟/retry/DLQ/replay，不产生重复领域副作用 / duplicate, reordered, delayed, retried and replayed deliveries without duplicate domain effects                               |
 | 探测 / Probes           | 并发预算、每目标限制、deadline、SSRF 防护、真实位置、策略 revision / concurrency budgets, deadlines, SSRF, actual locations, immutable policy revisions                                     |
-| 部署来源 / Provenance   | Manifest 幂等、内容冲突、签名上传、真实摘要/Build ID/source map 校验、ready 门禁 / manifests, conflicts, uploads, digests, Build IDs, source maps, readiness gate                           |
+| 部署来源 / Provenance   | Manifest 幂等、内容冲突、认证上传、真实摘要/Build ID/source map 校验、ready 门禁 / manifests, conflicts, uploads, digests, Build IDs, source maps, readiness gate                           |
 | 可观测性 / Telemetry    | 上下文传播、脱敏 canary、有界指标基数、后端故障隔离、自递归禁止 / context propagation, redaction, bounded cardinality, failure isolation, recursion prevention                              |
 | Ops                     | 类型检查、生产构建、角色门控、证据查询与操作、故障和过期时不显示全绿 / typecheck, build, role gates, evidence and mutations, unavailable/stale behavior                                     |
 | 发布 / Release          | CI 测试、WASM 构建、Worker dry-run、Ops Static Assets 构建、生产配置和外部集成门禁 / CI, WASM, Worker dry-runs, Static Assets build, production configuration and integration gates         |
@@ -44,3 +44,13 @@
 机器 JWT 由 Rust 发布 CLI 使用受保护 GitHub `MACHINE_JWT_PRIVATE_KEY` 在内存签发；OIDC 交换服务不是当前部署。管理员密码与密码记录不进入 GitHub；本机仓库外的受 OS ACL 保护私密 JSON 可用于 secret bulk 预置，不等于已安装 Worker secret。全部 9 个 D1 迁移和完整性检查已在远端通过；bootstrap、secret 安装与域名上线状态需独立留证。 / Rust signs machine JWTs in memory from the protected GitHub signing secret; an OIDC exchange service is not deployed. Administrator credentials never enter GitHub. An ACL-protected private JSON file outside the repository may provision secrets, but does not prove Worker-secret installation. Nine remote D1 migrations and integrity checks passed; independently verify bootstrap, secrets and domains.
 
 云端事实已推进到 bootstrap/管理员 secret/自定义域名/静态 UI；JWKS 与 HTML 的 200 和内容校验已通过，但业务与 session 503 保留门禁。初始 Cron API 10063 属于部分失败，不因后续域名成功而抹去；当前未启用 consumer 或定时器，不能称完整发布完成。 / Cloud evidence now covers bootstrap, administrator secret, domains and static UI with matching JWKS/HTML. Business/session 503 gates remain. Initial Cron API failure 10063 remains a partial failure despite later domain success; consumers/timers and full release remain incomplete.
+
+通知默认关闭：未配置目标时外部 outbox 保持 pending、attempts 不增，不启用 notification consumer；内部重评继续。TELEMETRY_AUTH_JSON 只在外部后端需要认证时设置。此选择避免无实际目标时制造重试风暴，不把可选外部集成变成核心服务上线前置。账户子域已初始化，历史 Cron 10063 前置解除；默认 workers.dev URL/preview 仍禁用，启用结果以真实部署为准。 / Disabled notifications retain pending external outbox without retry churn or consumers, while internal reevaluation continues. Telemetry credentials are optional. The account subdomain resolves the historical Cron prerequisite without exposing default URLs/previews.
+
+## 应用部署唯一入口 / Exclusive application deployment path
+
+**包括 bootstrap 在内，所有应用代码上传和部署必须经过 GitHub Actions。** 本机只执行 DNS/触发器、Secrets、D1/R2/Queue 资源初始化与测试，不再上传应用代码。早期本机上传 bootstrap/UI 的事实保留为历史记录，不是当前操作授权。 / **All application uploads and deployments, including bootstrap, must run through GitHub Actions.** Local work is limited to DNS/triggers, secrets, resource provisioning and tests. Early local application uploads are historical facts, not the current procedure.
+
+`bootstrap.yml` 提供严格受限的引导通道：status 更新前必须确认真实远端 `BOOTSTRAP_MODE=true`，只更新原生 R2 控制面；probe 首次创建使用固定私有 Worker 名。该工作流不配置 DNS/触发器，也不能替代正式 `deploy.yml` 的 artifact commit、ready 和版本 100% 发布门禁。工作流建设/测试不等于它已在生产成功执行。 / The restricted bootstrap workflow verifies remote bootstrap mode before updating the status R2 control plane and permits first creation of a fixed private probe Worker. It does not manage DNS/triggers or replace normal commit/readiness/full-version release gates. Workflow implementation is not production execution evidence.
+
+平台身份已通过一次 D1 原子导入建立：3 个服务、3 条审计、3 条 catalog.changed，monitor/component 均为 0；不以初始化元数据伪造健康状态。 / One atomic import created three services/audit/catalog events, zero monitors/components and no fabricated health.

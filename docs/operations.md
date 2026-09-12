@@ -4,11 +4,19 @@
 
 ## 当前云端事实 / Current cloud evidence
 
+以下本机应用上传属于早期历史，后续流程已纠正为仅 GitHub Actions 部署。 / Local application uploads below are early history; all subsequent deployment uses GitHub Actions exclusively.
+
 - 本机 Wrangler 已部署最终 Rust status 的 bootstrap 版本；`ADMIN_PASSWORD_RECORD` secret bulk 成功，平台列表类型为 `secret_text`，secret 更新后的版本已切换 100% 流量。 / Local Wrangler deployed the Rust bootstrap and installed the administrator secret, confirmed as secret_text with a full version cutover.
 - Rust Ops gateway 与 Static Assets 版本已上传；本机 `triggers deploy` 成功绑定 `status.moesegfault.dev` 和 `ops.moesegfault.dev`。HTTPS 公共 JWKS 返回 200 且与仓库公钥完全一致；Ops HTML 返回 200 且 SHA-256 与构建产物一致。 / Both custom domains are bound. HTTPS JWKS matches the repository public keys; served Ops HTML matches the built SHA-256, both returning 200.
 - `/v1/status` 与 `/api/session` 仍返回 503，符合 bootstrap/provenance 门禁；这不是绿色健康或成功登录的证据。 / Status and session APIs still return 503 under bootstrap/provenance gates, not successful health or login.
-- 初次 status 部署在更新空 Cron 配置时遇到 Cloudflare `10063`：账户缺少 workers.dev subdomain。该次脚本与四个 Queue producer 已成功，后续不含 Cron 的域名配置成功；不可把这次部分成功记录成整个部署命令成功。定时器和 Queue consumer 尚未启用。 / Initial deployment partially succeeded: script/producers uploaded, but empty-Cron configuration failed with 10063 because the account lacks a workers.dev subdomain. Subsequent domain configuration without Cron succeeded. Timers and queue consumers remain disabled.
-- S3 签名凭据、通知目标与完整注册/上传/ready 发布仍待完成。R2 对象级验证和静态页面可访问不能替代这些验收。 / S3 signing credentials, notification destinations and the complete registration/upload/readiness release remain outstanding; object checks and reachable static HTML do not replace them.
+- 初次 status 部署在更新空 Cron 配置时遇到 Cloudflare `10063`：账户缺少 workers.dev subdomain。该次脚本与四个 Queue producer 已成功，后续不含 Cron 的域名配置成功；不可把这次部分成功记录成整个部署命令成功。账户 workers.dev 子域 `moesegfault` 已初始化，10063 前置已解除；所有 Worker 默认 URL 与 preview 仍关闭。定时器/consumer 的实际启用结果须由后续部署确认。 / Initial deployment partially succeeded: script/producers uploaded, but empty-Cron configuration failed with 10063 because the account lacks a workers.dev subdomain. Subsequent domain configuration without Cron succeeded. The account subdomain moesegfault is now initialized, removing the 10063 prerequisite. Worker default URLs and previews remain disabled; subsequent deployment must verify timers/consumers.
+- 上传已改为 Rust Worker 认证 PUT + 原生 R2 binding，不需要 S3 签名凭据；通知默认关闭，不以未配置通知目标阻断发布。完整注册/上传/ready 与管理员激活仍须实际执行并留证。 / Authenticated Worker PUT with native R2 bindings removes the S3-credential requirement. Notifications are disabled by default and absent destinations do not block release. Registration/upload/readiness and owner activation still require execution evidence.
+
+## 应用部署唯一入口 / Exclusive application deployment path
+
+**包括 bootstrap 在内，所有应用代码上传和部署必须经过 GitHub Actions。** 本机只执行 DNS/触发器、Secrets、D1/R2/Queue 资源初始化与测试，不再上传应用代码。早期本机上传 bootstrap/UI 的事实保留为历史记录，不是当前操作授权。 / **All application uploads and deployments, including bootstrap, must run through GitHub Actions.** Local work is limited to DNS/triggers, secrets, resource provisioning and tests. Early local application uploads are historical facts, not the current procedure.
+
+`bootstrap.yml` 提供严格受限的引导通道：status 更新前必须确认真实远端 `BOOTSTRAP_MODE=true`，只更新原生 R2 控制面；probe 首次创建使用固定私有 Worker 名。该工作流不配置 DNS/触发器，也不能替代正式 `deploy.yml` 的 artifact commit、ready 和版本 100% 发布门禁。工作流建设/测试不等于它已在生产成功执行。 / The restricted bootstrap workflow verifies remote bootstrap mode before updating the status R2 control plane and permits first creation of a fixed private probe Worker. It does not manage DNS/triggers or replace normal commit/readiness/full-version release gates. Workflow implementation is not production execution evidence.
 
 ## 1. 权限与职责 / Authority and responsibility
 
@@ -59,14 +67,14 @@
 
 远端 D1 已真实应用全部 9 个迁移；`verify-d1` 的 `target/d1-auth-verification.json` 记录验证通过，`PRAGMA foreign_key_check` 与 `PRAGMA quick_check` 均无异常。R2 已开通，私有 bucket 已创建，并已执行真实云端 PUT → GET → SHA-256 校验 → DELETE。四个诊断/通知主队列与 DLQ 已创建，四个 producer 绑定已上传；consumer 与定时器尚未启用。应用尚未完成完整生产发布。 / All nine remote D1 migrations are applied; verify-d1 recorded success in target/d1-auth-verification.json, with clean foreign_key_check and quick_check results. R2 is enabled and its private bucket passed an actual cloud PUT/GET/SHA-256/DELETE check. Four diagnostic/notification queues and DLQs exist and four producer bindings are uploaded; consumers and timers are not enabled. Full production application release is not complete.
 
-不要重复创建这些资源。新增资源或更改计费必须另行审阅；真实 R2 对象检查不等于应用的带 JWT 注册、预签名上传及 ready 闭环已在生产验收。 / Do not recreate existing resources. Review new provisioning/billing separately; the R2 object check does not establish the application's authenticated registration/upload/readiness path.
+不要重复创建这些资源。新增资源或更改计费必须另行审阅；真实 R2 对象检查不等于应用的带 JWT 注册、认证 PUT 上传及 ready 闭环已在生产验收。 / Do not recreate existing resources. Review new provisioning/billing separately; the R2 object check does not establish the application's authenticated registration/upload/readiness path.
 
 随后把真实 D1 `database_id`、Queue、DLQ、R2 名称写入受审阅的环境配置。Analytics Engine 数据集无需预建：声明 binding 后第一次 `writeDataPoint` 自动创建。[Analytics Engine setup](https://developers.cloudflare.com/analytics/analytics-engine/get-started/)
 
 必须逐项核验：
 
 - 主 Queue 的 consumer 指向 status，`max_retries=5`，并配置 DLQ；status 还需要 `DIAGNOSTIC_DLQ` producer binding，才能保存结构化失败上下文；
-- R2 bucket 为私有，禁用公共 `r2.dev`；上传只用短效、对象键/checksum/metadata 受限的 presigned URL。Presigned URL 是 bearer credential，只能短期暴露。[R2 presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
+- R2 bucket 保持私有、禁用公共 `r2.dev`。Rust Worker 验证机器 JWT 后通过原生 binding 执行条件 PUT；不需要 R2 S3 access key。 / Keep R2 private; authenticated Rust Worker PUT uses native bindings and requires no S3 access key. [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
 - AE binding 为 `ANALYTICS`/`moesegfault_status`；AE 不是领域状态源；
 - `STATUS` Service Binding 精确指向 status 的 `AdminRpc` named entrypoint；
 - production 与 staging 使用不同 D1、Queue/DLQ、R2 bucket、Worker 名与 secrets，不能只靠 `ENVIRONMENT` 字符串隔离。
@@ -78,10 +86,10 @@
 ```bash
 pnpm exec wrangler secret put ADMIN_PASSWORD_RECORD --config wrangler.jsonc
 pnpm exec wrangler secret put CURSOR_SIGNING_KEY --config wrangler.jsonc
-pnpm exec wrangler secret put R2_ACCESS_KEY_ID --config wrangler.jsonc
-pnpm exec wrangler secret put R2_SECRET_ACCESS_KEY --config wrangler.jsonc
+# 以下仅启用外部通知时需要。 / Only required when enabling external notifications.
 pnpm exec wrangler secret put NOTIFICATION_WEBHOOK_URL --config wrangler.jsonc
 pnpm exec wrangler secret put NOTIFICATION_AUTHORIZATION --config wrangler.jsonc
+# 可选：仅外部遥测后端需要凭据时设置。 / Optional: only for authenticated external telemetry backends.
 pnpm exec wrangler secret put TELEMETRY_AUTH_JSON --config wrangler.jsonc
 ```
 
@@ -91,7 +99,9 @@ Telemetry credentials are resolved from matching keys inside the `TELEMETRY_AUTH
 
 ### 2.1.1 通知交付边界 / Notification delivery boundary
 
-部署前创建 `moesegfault-status-notifications` 与 `moesegfault-status-notifications-dlq`，并核对 Wrangler producer/consumer 名称。通知只携带事件 ID、事件类型和领域对象 ID，不转发 outbox 私有正文、定位器或审计主体。
+`NOTIFICATIONS_ENABLED` 默认 `false`。没有目标或尚未启用时，外部通知 outbox 留在 D1 的 pending 状态，attempts 不增加，也不伪造 delivered；内部领域重评不能因此停止。通知 consumer 只在安装并核验目标、设置 `NOTIFICATIONS_ENABLED=true` 后启用。无通知目标不是核心服务上线门禁，但必须清楚告知通知不可用。 / Notifications default to disabled. External outbox records remain pending without incrementing attempts or claiming delivery; internal reevaluation continues. Enable the notification consumer only after configuring/verifying the destination and explicit enablement. An absent notification target does not block core service release, but notification unavailability must remain visible.
+
+部署前创建 `moesegfault-status-notifications` 与 `moesegfault-status-notifications-dlq`，并核对 Wrangler producer/consumer 名称；目前资源已存在，不重复创建。通知只携带事件 ID、事件类型和领域对象 ID，不转发 outbox 私有正文、定位器或审计主体。
 
 Create both notification queues before deployment and verify their configured names. Messages contain only event identity/type and aggregate identity, never private outbox payloads, locators, or principals.
 
@@ -191,13 +201,24 @@ cargo run --locked -p status-release -- --config release.status.json --dry-run
 
 完整配置与首次双阶段引导见 [Rust 发布说明](../scripts/release/rust-release-README.md)。这些命令不是已执行云端部署的记录。 / See the Rust release runbook for configuration and two-stage bootstrap; these commands are instructions, not deployment evidence.
 
+### 4.1 原生 R2 上传协议 / Native R2 upload protocol
+
+每件 artifact 最多 64 MiB，source map 最多 8 MiB；上传 session 有效期 600 秒。PUT 必须携带当前机器 JWT 的 `artifacts:write` scope，并精确匹配 session 的 `Content-Length`、`Content-Type`、`Content-MD5`、`If-None-Match: *` 四个请求头。同源 HTTPS 上传地址禁止重定向；不能把 JWT 发往任意 URL。Worker 执行原生 R2 条件写入，随后仍必须完成服务端 commit 的实际摘要/元数据检查和 ready 门禁。 / Artifacts are bounded to 64 MiB, source maps to 8 MiB, and sessions to 600 seconds. Authenticated same-origin HTTPS PUT requires artifacts:write and exact length/type/MD5/non-overwrite headers. Reject redirects and arbitrary JWT destinations. Native R2 conditional writes retain authoritative commit checks and readiness gates.
+
+该选择替代原设计的 S3 预签名传输：缩小凭据面并复用现有 JWT/R2 binding，代价是字节经过 Worker、需严格请求大小及截止时间。没有取消产物注册、幂等、不可覆盖、SHA-256 或 ready 安全约束。 / This replaces S3 presigned transport, reducing credentials by reusing JWT and R2 bindings. The trade-off is Worker-proxied traffic requiring strict bounds/deadlines; registration, idempotency, non-overwrite, SHA-256 and readiness invariants remain.
+
+### 4.2 首次平台身份与上线顺序 / Initial platform identity and release order
+
+本机已通过 D1 原子导入建立 `status`、`ops-gateway`、`probe-executor` 三个真实内部服务身份，同时写入 3 条 audit 与 3 条 catalog.changed outbox；远端完整性验证通过，monitor/component 均为 0。这不是创建业务 monitor/component 或健康观测，不得伪造 operational。随后由 GitHub Actions 发布三个服务的真实 artifact 与版本，逐一通过完整 ready 门禁；所有发布与 smoke 验收满足后，再由 owner 显式激活。当前记录的是操作流程，不是声称这轮生产发布已经成功。 / An atomic D1 import created three real internal identities, three audit entries and three catalog.changed outbox records. Remote integrity checks passed, with zero monitors/components and no healthy observations. GitHub Actions then publishes actual artifacts/versions with readiness gates. Owner activation follows successful release and smoke checks; this procedure is not a claim of completion.
+
 `deployed_at`、`ci_provider` 与 `ci_run_id` 必须在第一次注册前冻结。`release_attempt` 不进入 immutable Manifest：同一 attempt 的网络重试必须复用它；只有服务器报告 upload session 已过期时才递增并重新运行。否则相同 `deployment_id` 会因 Manifest 内容变化而正确返回 409。GitHub runner 还会强制 `repository_url` 匹配 `GITHUB_REPOSITORY`，且 `git_ref` 必须解析到当前 HEAD。
 
 ```bash
 # 本地只校验并输出 canonical manifest；不访问网络、不部署。
 cargo run --locked -p status-release -- --config release.status.json --verify-only
 
-# 受审批 runner：秘密只存在环境中。
+# 仅在受审批 GitHub Actions runner 内执行；禁止本机上传应用代码。
+# Run only inside approved GitHub Actions; never upload application code locally.
 export MOE_RELEASE_API_URL='https://status.moesegfault.dev'
 # MACHINE_JWT_PRIVATE_KEY 由受保护 runner 环境注入；Rust CLI 内存签发。
 # Inject MACHINE_JWT_PRIVATE_KEY through the protected runner environment; Rust signs in memory.
@@ -290,7 +311,7 @@ Cloudflare Workers 的 OpenTelemetry Protocol（OTLP）export 目前支持 **tra
 | Analytics Engine unavailable       | 降级派生分析，D1 领域判断继续                                                       | 不从 AE 回写权威 status                                            | 写入/查询 canary 与延迟恢复                                                |
 | Scheduler/probe region failure     | freshness 到期后显示 unknown；比对多地点与 dependency graph                         | 不用单一失败地点直接扩大 outage                                    | 多地点样本、policy revision、freshness 恢复                                |
 
-每次事件保留：UTC 时间线、deployment ID、git commit、Correlation/trace ID、受影响 binding、失败阶段、采取的幂等命令、恢复验证与后续 action。严禁粘贴 authorization header、密码/session cookie、presigned URL 或 R2 credential。
+每次事件保留：UTC 时间线、deployment ID、git commit、Correlation/trace ID、受影响 binding、失败阶段、采取的幂等命令、恢复验证与后续 action。严禁粘贴 authorization header、密码/session cookie、上传 session 凭据或机器 JWT。
 
 ## 9. 发布前最终门禁 / Final go-live gate
 
@@ -300,7 +321,7 @@ Cloudflare Workers 的 OpenTelemetry Protocol（OTLP）export 目前支持 **tra
 - [ ] D1/Queue/DLQ/R2/AE/Service Binding 均为 production 独立资源，DLQ 告警已触发测试。
 - [ ] source map 能把生产 canary stack 定位到同一 git commit；R2 digest/metadata 一致。
 - [ ] retention migration、cleanup、D1 restore、DLQ canary replay 已演练并有证据。
-- [ ] OTLP trace/log destination 可检索；metrics 缺口有明确替代；external telemetry outage 不会显示绿色。
+- [ ] 若启用外部遥测/通知，其目标与凭据已验证；未启用时明确标记不可用，保持 outbox pending，不伪造绿色或 delivered。
 - [ ] 受控 production release 有 required reviewers；GitHub 无 DNS/Access 权限、无管理员密码；secret scanning/branch protection 已启用。
 
 任一项未完成：保持 workflow 手动、不得接 production 流量。可爱归可爱，生产事故可一点也不萌喵。
@@ -350,3 +371,7 @@ Monitor bindings select finite registry aliases, never arbitrary environment fie
 空注册表明确无可执行能力。上线前需分别验证真实地域来源、不同 colo 仲裁、缺失来源拒绝、目标超时、执行器故障、合成数据清理及租约竞争。本地 workerd 证明协议和绑定执行，不证明地理分布。
 
 An empty registry exposes no executable capability. Before enabling production monitors, validate real geographic provenance, independent-colo quorum, missing-provenance rejection, target timeouts, executor failures, synthetic cleanup, and lease races. Local workerd validates protocol execution, not geographic distribution.
+
+## 最新专项验证 / Latest focused verification
+
+三个 production 构建已通过；本机 46 MiB 原生 R2 认证上传与 DigestStream 流式摘要 commit → ready 专项测试通过。这是构建与本机测试证据，不代表正式 Actions 发布或生产激活完成。 / All three production builds passed, as did the local 46 MiB native-R2 upload and streaming-digest commit/readiness test. This does not prove production Actions release or activation.
