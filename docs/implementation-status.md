@@ -12,6 +12,16 @@
 
 以上测试证明对应基线，不自动证明后来修改或完整生产链路。 / These results establish the corresponding baseline, not subsequent changes or complete production integration.
 
+### 2026-09-12 集成检查点 / Integration checkpoint
+
+- `4ebf3f1`：显式恢复证据绑定最新故障，Rust 29 项测试与严格 Clippy 通过。 / Explicit recovery binds to the latest fault; 29 Rust tests and strict Clippy pass.
+- 重建 WASM 后，本次工作树 Vitest 40 个文件、187 项测试通过；Status TypeScript、18 项数据库测试和 OpenAPI lint 通过。并行模块仍在编辑，此结果不是最终冻结验收。 / After rebuilding WASM, this working-tree checkpoint passed 187 tests across 40 files, Status type checking, 18 database tests, and OpenAPI lint. Concurrent modules remain in development; this is not final acceptance.
+- 诊断生产者参考 SDK 已有有界投递、稳定重试身份、源头脱敏及 canary 测试；需纳入发布与完整集成验收。 / The diagnostic producer SDK has bounded delivery, stable retry identity, source redaction, and canary tests; release/integration acceptance remains.
+- 通知已接入真实 Queue producer/consumer 与固定 HTTPS webhook adapter；事件仅含标识，接收方去重与 DLQ 运维仍需部署演练。 / Notifications now have concrete Queue and pinned-webhook adapters; receiver deduplication and DLQ operations still need deployment exercises.
+- 遥测适配器已接入私有 RPC 与 viewer 查询路由；实际外部后端尚未配置，测试不代表真实供应商集成已运行。 / Telemetry adapters now expose private RPC and viewer queries; actual external backends remain unconfigured.
+
+以下工作列表中的早期描述由此检查点补充，但只有完成最终路径验证后才能关闭条目。 / This checkpoint supplements the earlier descriptions below; only final path verification closes an item.
+
 ## 仍需完成的端到端路径 / Remaining end-to-end paths
 
 | 需求 / Requirement                                    | 当前证据与后续动作 / Evidence and next action                                                                                                                                                                                      |
