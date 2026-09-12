@@ -121,3 +121,6 @@ jobs:
         run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
       - name: Run native tests
         run: cargo test --locked --workspace
+      # 验证 Rust 平台代码，而非仅原生纯函数。 / Check Rust platform code, not just native pure functions.
+      - name: Check Rust backend against Workers WASM target
+        run: cargo clippy --locked -p status-backend --target wasm32-unknown-unknown -- -D warnings
