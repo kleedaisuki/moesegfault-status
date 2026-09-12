@@ -63,14 +63,14 @@ BEGIN SELECT RAISE(ABORT, 'diagnostic policy assignment must start at revision o
 CREATE TRIGGER service_diagnostic_policies_revision
 BEFORE UPDATE ON service_diagnostic_policies
 BEGIN
-    SELECT CASE WHEN NEW.revision <> OLD.revision + 1
-        THEN RAISE(ABORT, 'diagnostic policy assignment revision must increase by one') END;
-    SELECT CASE WHEN NEW.assignment_id <> OLD.assignment_id OR
+    SELECT (CASE WHEN NEW.revision <> OLD.revision + 1
+        THEN RAISE(ABORT, 'diagnostic policy assignment revision must increase by one') END);
+    SELECT (CASE WHEN NEW.assignment_id <> OLD.assignment_id OR
         NEW.selector_kind <> OLD.selector_kind OR
         NEW.monitor_id IS NOT OLD.monitor_id OR
         NEW.service_name IS NOT OLD.service_name OR
         NEW.diagnostic_kind IS NOT OLD.diagnostic_kind
-        THEN RAISE(ABORT, 'diagnostic policy selector identity is immutable') END;
+        THEN RAISE(ABORT, 'diagnostic policy selector identity is immutable') END);
 END;
 
 PRAGMA defer_foreign_keys = off;

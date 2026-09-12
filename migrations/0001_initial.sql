@@ -279,17 +279,17 @@ CREATE INDEX idx_status_transitions_target_time
 CREATE TRIGGER status_transitions_validate_sequence
 BEFORE INSERT ON status_transitions
 BEGIN
-    SELECT CASE WHEN NEW.sequence <> COALESCE((
+    SELECT (CASE WHEN NEW.sequence <> COALESCE((
         SELECT MAX(sequence) + 1 FROM status_transitions
         WHERE target_type = NEW.target_type AND target_id = NEW.target_id
-    ), 1) THEN RAISE(ABORT, 'status transition sequence is not next') END;
-    SELECT CASE WHEN NEW.sequence = 1 AND NEW.from_status IS NOT NULL
-        THEN RAISE(ABORT, 'first status transition must have NULL from_status') END;
-    SELECT CASE WHEN NEW.sequence > 1 AND NEW.from_status IS NOT (
+    ), 1) THEN RAISE(ABORT, 'status transition sequence is not next') END);
+    SELECT (CASE WHEN NEW.sequence = 1 AND NEW.from_status IS NOT NULL
+        THEN RAISE(ABORT, 'first status transition must have NULL from_status') END);
+    SELECT (CASE WHEN NEW.sequence > 1 AND NEW.from_status IS NOT (
         SELECT to_status FROM status_transitions
         WHERE target_type = NEW.target_type AND target_id = NEW.target_id
         ORDER BY sequence DESC LIMIT 1
-    ) THEN RAISE(ABORT, 'status transition from_status does not match current state') END;
+    ) THEN RAISE(ABORT, 'status transition from_status does not match current state') END);
 END;
 
 CREATE TRIGGER status_transitions_no_update
@@ -443,17 +443,17 @@ CREATE TABLE deployment_status_history (
 CREATE TRIGGER deployment_status_validate_sequence
 BEFORE INSERT ON deployment_status_history
 BEGIN
-    SELECT CASE WHEN NEW.sequence <> COALESCE((
+    SELECT (CASE WHEN NEW.sequence <> COALESCE((
         SELECT MAX(sequence) + 1 FROM deployment_status_history WHERE deployment_id = NEW.deployment_id
-    ), 1) THEN RAISE(ABORT, 'deployment status sequence is not next') END;
-    SELECT CASE WHEN NEW.sequence = 1 AND NEW.state <> 'registered'
-        THEN RAISE(ABORT, 'first deployment status must be registered') END;
-    SELECT CASE WHEN NEW.sequence > 1 AND NEW.state = (
+    ), 1) THEN RAISE(ABORT, 'deployment status sequence is not next') END);
+    SELECT (CASE WHEN NEW.sequence = 1 AND NEW.state <> 'registered'
+        THEN RAISE(ABORT, 'first deployment status must be registered') END);
+    SELECT (CASE WHEN NEW.sequence > 1 AND NEW.state = (
         SELECT state FROM deployment_status_history WHERE deployment_id = NEW.deployment_id ORDER BY sequence DESC LIMIT 1
-    ) THEN RAISE(ABORT, 'deployment status must change') END;
-    SELECT CASE WHEN NEW.sequence > 1 AND (
+    ) THEN RAISE(ABORT, 'deployment status must change') END);
+    SELECT (CASE WHEN NEW.sequence > 1 AND (
         SELECT state FROM deployment_status_history WHERE deployment_id = NEW.deployment_id ORDER BY sequence DESC LIMIT 1
-    ) = 'retired' THEN RAISE(ABORT, 'retired deployment is terminal') END;
+    ) = 'retired' THEN RAISE(ABORT, 'retired deployment is terminal') END);
 END;
 
 CREATE TRIGGER deployment_status_no_update
@@ -481,23 +481,23 @@ CREATE TABLE service_environment_deployments (
 CREATE TRIGGER service_environment_deployments_validate
 BEFORE INSERT ON service_environment_deployments
 BEGIN
-    SELECT CASE WHEN NEW.environment <> (SELECT environment FROM deployments WHERE deployment_id = NEW.deployment_id)
-        THEN RAISE(ABORT, 'current deployment environment mismatch') END;
-    SELECT CASE WHEN (SELECT state FROM deployment_current_status WHERE deployment_id = NEW.deployment_id) NOT IN ('ready', 'active')
-        THEN RAISE(ABORT, 'current deployment must be ready or active') END;
+    SELECT (CASE WHEN NEW.environment <> (SELECT environment FROM deployments WHERE deployment_id = NEW.deployment_id)
+        THEN RAISE(ABORT, 'current deployment environment mismatch') END);
+    SELECT (CASE WHEN (SELECT state FROM deployment_current_status WHERE deployment_id = NEW.deployment_id) NOT IN ('ready', 'active')
+        THEN RAISE(ABORT, 'current deployment must be ready or active') END);
 END;
 
 CREATE TRIGGER service_environment_deployments_validate_update
 BEFORE UPDATE ON service_environment_deployments
 BEGIN
-    SELECT CASE WHEN NEW.revision <> OLD.revision + 1
-        THEN RAISE(ABORT, 'current deployment revision must increase by one') END;
-    SELECT CASE WHEN NEW.service_name <> OLD.service_name OR NEW.environment <> OLD.environment
-        THEN RAISE(ABORT, 'current deployment identity is immutable') END;
-    SELECT CASE WHEN NEW.environment <> (SELECT environment FROM deployments WHERE deployment_id = NEW.deployment_id)
-        THEN RAISE(ABORT, 'current deployment environment mismatch') END;
-    SELECT CASE WHEN (SELECT state FROM deployment_current_status WHERE deployment_id = NEW.deployment_id) NOT IN ('ready', 'active')
-        THEN RAISE(ABORT, 'current deployment must be ready or active') END;
+    SELECT (CASE WHEN NEW.revision <> OLD.revision + 1
+        THEN RAISE(ABORT, 'current deployment revision must increase by one') END);
+    SELECT (CASE WHEN NEW.service_name <> OLD.service_name OR NEW.environment <> OLD.environment
+        THEN RAISE(ABORT, 'current deployment identity is immutable') END);
+    SELECT (CASE WHEN NEW.environment <> (SELECT environment FROM deployments WHERE deployment_id = NEW.deployment_id)
+        THEN RAISE(ABORT, 'current deployment environment mismatch') END);
+    SELECT (CASE WHEN (SELECT state FROM deployment_current_status WHERE deployment_id = NEW.deployment_id) NOT IN ('ready', 'active')
+        THEN RAISE(ABORT, 'current deployment must be ready or active') END);
 END;
 
 -- Diagnostic dedup rows are durable tombstones: deleting them would permit replay side effects.
@@ -627,16 +627,16 @@ BEGIN SELECT RAISE(ABORT, 'new issue must start in observed state'); END;
 CREATE TRIGGER issues_validate_update
 BEFORE UPDATE ON issues
 BEGIN
-    SELECT CASE WHEN NEW.revision <> OLD.revision + 1
-        THEN RAISE(ABORT, 'issue revision must increase by one') END;
-    SELECT CASE WHEN OLD.state = 'resolved'
-        THEN RAISE(ABORT, 'resolved issue is immutable; create a recurrence') END;
-    SELECT CASE WHEN NEW.state <> OLD.state AND NOT (
+    SELECT (CASE WHEN NEW.revision <> OLD.revision + 1
+        THEN RAISE(ABORT, 'issue revision must increase by one') END);
+    SELECT (CASE WHEN OLD.state = 'resolved'
+        THEN RAISE(ABORT, 'resolved issue is immutable; create a recurrence') END);
+    SELECT (CASE WHEN NEW.state <> OLD.state AND NOT (
         (OLD.state = 'observed' AND NEW.state IN ('active', 'resolved')) OR
         (OLD.state = 'active' AND NEW.state IN ('recovering', 'suppressed')) OR
         (OLD.state = 'recovering' AND NEW.state IN ('active', 'resolved')) OR
         (OLD.state = 'suppressed' AND NEW.state IN ('active', 'resolved'))
-    ) THEN RAISE(ABORT, 'invalid issue state transition') END;
+    ) THEN RAISE(ABORT, 'invalid issue state transition') END);
 END;
 
 CREATE TRIGGER issues_validate_recurrence
@@ -752,16 +752,16 @@ CREATE INDEX idx_incident_updates_time ON incident_updates(incident_id, occurred
 CREATE TRIGGER incident_updates_validate_sequence
 BEFORE INSERT ON incident_updates
 BEGIN
-    SELECT CASE WHEN NEW.sequence <> COALESCE((
+    SELECT (CASE WHEN NEW.sequence <> COALESCE((
         SELECT MAX(sequence) + 1 FROM incident_updates WHERE incident_id = NEW.incident_id
-    ), 1) THEN RAISE(ABORT, 'incident update sequence is not next') END;
-    SELECT CASE WHEN NEW.sequence = 1 AND NEW.state <> 'investigating'
-        THEN RAISE(ABORT, 'incident must start in investigating state') END;
-    SELECT CASE WHEN NEW.sequence > 1 AND NOT (
+    ), 1) THEN RAISE(ABORT, 'incident update sequence is not next') END);
+    SELECT (CASE WHEN NEW.sequence = 1 AND NEW.state <> 'investigating'
+        THEN RAISE(ABORT, 'incident must start in investigating state') END);
+    SELECT (CASE WHEN NEW.sequence > 1 AND NOT (
         ((SELECT state FROM incident_updates WHERE incident_id = NEW.incident_id ORDER BY sequence DESC LIMIT 1) = 'investigating' AND NEW.state IN ('investigating', 'identified', 'monitoring')) OR
         ((SELECT state FROM incident_updates WHERE incident_id = NEW.incident_id ORDER BY sequence DESC LIMIT 1) = 'identified' AND NEW.state IN ('identified', 'monitoring', 'resolved')) OR
         ((SELECT state FROM incident_updates WHERE incident_id = NEW.incident_id ORDER BY sequence DESC LIMIT 1) = 'monitoring' AND NEW.state IN ('monitoring', 'investigating', 'resolved'))
-    ) THEN RAISE(ABORT, 'invalid incident state transition') END;
+    ) THEN RAISE(ABORT, 'invalid incident state transition') END);
 END;
 
 CREATE TRIGGER incident_updates_no_update
@@ -791,10 +791,10 @@ CREATE TABLE incident_issue_relations (
 CREATE TRIGGER incident_issue_relations_validate
 BEFORE INSERT ON incident_issue_relations
 BEGIN
-    SELECT CASE WHEN COALESCE((SELECT action FROM incident_issue_relations
+    SELECT (CASE WHEN COALESCE((SELECT action FROM incident_issue_relations
         WHERE incident_id = NEW.incident_id AND issue_id = NEW.issue_id
         ORDER BY update_sequence DESC LIMIT 1), 'removed') = NEW.action
-        THEN RAISE(ABORT, 'incident issue relation action must alternate') END;
+        THEN RAISE(ABORT, 'incident issue relation action must alternate') END);
 END;
 
 CREATE TRIGGER incident_issue_relations_no_update
@@ -823,10 +823,10 @@ CREATE TABLE incident_component_relations (
 CREATE TRIGGER incident_component_relations_validate
 BEFORE INSERT ON incident_component_relations
 BEGIN
-    SELECT CASE WHEN COALESCE((SELECT action FROM incident_component_relations
+    SELECT (CASE WHEN COALESCE((SELECT action FROM incident_component_relations
         WHERE incident_id = NEW.incident_id AND component_id = NEW.component_id
         ORDER BY update_sequence DESC LIMIT 1), 'removed') = NEW.action
-        THEN RAISE(ABORT, 'incident component relation action must alternate') END;
+        THEN RAISE(ABORT, 'incident component relation action must alternate') END);
 END;
 
 CREATE TRIGGER incident_component_relations_no_update
@@ -855,10 +855,10 @@ CREATE TABLE incident_service_relations (
 CREATE TRIGGER incident_service_relations_validate
 BEFORE INSERT ON incident_service_relations
 BEGIN
-    SELECT CASE WHEN COALESCE((SELECT action FROM incident_service_relations
+    SELECT (CASE WHEN COALESCE((SELECT action FROM incident_service_relations
         WHERE incident_id = NEW.incident_id AND service_name = NEW.service_name
         ORDER BY update_sequence DESC LIMIT 1), 'removed') = NEW.action
-        THEN RAISE(ABORT, 'incident service relation action must alternate') END;
+        THEN RAISE(ABORT, 'incident service relation action must alternate') END);
 END;
 
 CREATE TRIGGER incident_service_relations_no_update
