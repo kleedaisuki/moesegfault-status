@@ -1,0 +1,16 @@
+{
+  // 仅配置资源；部署前补充 Worker 入口。 / Resources only; add a Worker entry point before deployment.
+  "name": "moesegfault-status",
+  "account_id": "07109e406d4e1ab7a0997dd399db6fd5",
+  "compatibility_date": "2026-09-12",
+  "d1_databases": [
+    {
+      // 权威领域状态共用一个事务边界，不存原始遥测。 / One transaction boundary for authoritative domain state, not raw telemetry.
+      "binding": "DB",
+      "database_name": "moesegfault-status",
+      "database_id": "40674161-5e59-470c-bb1c-33bc612d7e6b",
+      // 后续使用编号迁移建表；当前远端数据库尚无领域表。 / Use numbered migrations for future schema; no domain tables exist yet.
+      "migrations_dir": "migrations"
+    }
+  ]
+}
