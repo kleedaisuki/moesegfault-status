@@ -1,6 +1,8 @@
 /**
  * 本机预置唯一管理员；永不注册首位访问者、输出密码或交给 CI。
  * Provision the sole administrator locally; never enroll visitors or expose secrets to CI.
+ * 只接受系统生成的 24 字节随机密码，不提供人工密码参数或环境变量入口。
+ * Only generate 24 random bytes; no human-password argument or environment input.
  * Usage / 用法: node scripts/operations/admin-secret.mjs create|upload [--directory PRIVATE_DIR]
  * Rotation / 轮换: create into a NEW private directory, upload after verifying the target,
  * then verify new login and old-session rejection at 100% traffic before retiring old files.
@@ -33,6 +35,9 @@ import { fileURLToPath } from "node:url";
 const repository = realpathSync(
   resolve(dirname(fileURLToPath(import.meta.url)), "../.."),
 );
+/** 仅用于生成的 192-bit 随机凭据；不是人类密码策略。 / Only for generated 192-bit secrets, not human passwords. */
+const iterations = 100000;
+const passwordBytes = 24;
 const passwordName = "administrator-login.txt";
 const secretName = "status-worker-secrets.json";
 
@@ -120,7 +125,7 @@ export function validateSecret(value) {
     Array.isArray(record) ||
     Object.keys(record).sort().join() !== "algorithm,hash,iterations,salt" ||
     record.algorithm !== "PBKDF2-SHA256" ||
-    record.iterations !== 600000
+    record.iterations !== iterations
   )
     throw new Error("Invalid password record.");
   for (const [key, bytes] of [
@@ -150,13 +155,13 @@ export function createCredentials(directory) {
       "Credentials already exist; use a new private directory for rotation.",
     );
   secureDirectory(path);
-  const password = randomBytes(24).toString("base64url");
+  const password = randomBytes(passwordBytes).toString("base64url");
   const salt = randomBytes(16);
   const record = {
     algorithm: "PBKDF2-SHA256",
-    iterations: 600000,
+    iterations,
     salt: salt.toString("base64url"),
-    hash: pbkdf2Sync(password, salt, 600000, 32, "sha256").toString(
+    hash: pbkdf2Sync(password, salt, iterations, 32, "sha256").toString(
       "base64url",
     ),
   };

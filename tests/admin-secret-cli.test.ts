@@ -14,6 +14,7 @@ import { pbkdf2Sync } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   createCredentials,
+  main,
   privateDirectory,
   uploadCredentials,
   validateSecret,
@@ -41,6 +42,7 @@ describe("local administrator provisioning", () => {
     const envelope = JSON.parse(
       readFileSync(join(path, "status-worker-secrets.json"), "utf8"),
     );
+    expect(Buffer.from(password, "base64url")).toHaveLength(24);
     expect(password).toMatch(/^[A-Za-z0-9_-]{32}$/);
     expect(validateSecret(envelope)).toEqual(envelope);
     const record = JSON.parse(envelope.ADMIN_PASSWORD_RECORD);
@@ -48,7 +50,7 @@ describe("local administrator provisioning", () => {
       pbkdf2Sync(
         password,
         Buffer.from(record.salt, "base64url"),
-        600000,
+        100000,
         32,
         "sha256",
       ).toString("base64url"),
@@ -63,6 +65,21 @@ describe("local administrator provisioning", () => {
         0o600,
       );
     }
+  });
+
+  it("rejects human-password arguments before any credential creation", () => {
+    expect(() => main(["create", "--password", "human-password"])).toThrow(
+      "Usage",
+    );
+    expect(() =>
+      main([
+        "create",
+        "--directory",
+        directory(),
+        "--password",
+        "human-password",
+      ]),
+    ).toThrow("Usage");
   });
 
   it("rejects repository paths including dot-dot-prefixed child names and aliases", () => {
@@ -120,6 +137,7 @@ describe("local administrator provisioning", () => {
     const record = JSON.parse(envelope.ADMIN_PASSWORD_RECORD);
     for (const modification of [
       { iterations: 1 },
+      { iterations: 600000 },
       { salt: "A" },
       { hash: record.hash + "=" },
       { extra: true },
