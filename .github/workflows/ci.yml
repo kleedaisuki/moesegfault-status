@@ -1,0 +1,123 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CI: "true"
+
+jobs:
+  contracts:
+    name: Contracts and OpenAPI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-js
+      - name: Regenerate contracts without drift
+        run: pnpm contracts:check
+      - name: Lint OpenAPI 3.1.1
+        run: pnpm openapi:lint
+      - name: Enforce OpenAPI invariants
+        run: pnpm exec tsx scripts/release/openapi-gate.ts packages/contracts/openapi.json
+      - name: Compare pull request with its actual base
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if git cat-file -e "origin/${BASE_REF}:packages/contracts/openapi.json" 2>/dev/null; then
+            git show "origin/${BASE_REF}:packages/contracts/openapi.json" > "${RUNNER_TEMP}/openapi-base.json"
+            pnpm exec tsx scripts/release/openapi-gate.ts packages/contracts/openapi.json "${RUNNER_TEMP}/openapi-base.json"
+          else
+            echo "::notice::Base revision has no OpenAPI artifact; this pull request establishes the compatibility baseline."
+          fi
+
+  typescript:
+    name: TypeScript, WASM, Workers and Ops
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-js
+      - uses: ./.github/actions/setup-rust-wasm
+      - name: Build Rust WASM bridge before imports and integration tests
+        run: node scripts/build-wasm.mjs
+      - name: Check formatting
+        run: pnpm format:check
+      - name: Type-check every workspace
+        run: pnpm typecheck
+      - name: Type-check release tooling
+        run: >-
+          pnpm exec tsc --noEmit --module NodeNext --moduleResolution NodeNext
+          --target ES2024 --types node scripts/release/provenance.ts
+          scripts/release/deploy.ts scripts/release/openapi-gate.ts
+      - name: Run TypeScript tests
+        run: pnpm test
+      - name: Run release safety tests
+        run: pnpm release:test
+      - name: Check contract and telemetry packages
+        run: |
+          pnpm --filter @moesegfault/contracts build
+          pnpm --filter @moesegfault/telemetry build
+      - name: Dry-run status Worker deployment
+        run: pnpm --filter @moesegfault/status build
+      - name: Dry-run operations gateway deployment
+        run: pnpm --filter @moesegfault/ops-gateway build
+      - name: Dry-run regional probe executor deployment
+        run: pnpm --filter @moesegfault/probe-executor build
+      - name: Build operations UI with Vite
+        run: pnpm --filter @moesegfault/ops build
+
+  database:
+    name: SQL schema tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Python 3.13
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+      - name: Test migrations and SQL invariants
+        run: python -m unittest discover -s tests/database -v
+
+  rust:
+    name: Native Rust
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install stable Rust from rustup
+        run: |
+          rustup set profile minimal
+          rustup toolchain install stable --component rustfmt,clippy --target wasm32-unknown-unknown
+          rustup default stable
+      - name: Check rustfmt
+        run: cargo fmt --all -- --check
+      - name: Reject Clippy warnings
+        run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      - name: Run native tests
+        run: cargo test --locked --workspace

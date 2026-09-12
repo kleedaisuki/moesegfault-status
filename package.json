@@ -10,6 +10,8 @@
   },
   "scripts": {
     "test": "vitest run",
+    "test:runtime": "vitest run tests/runtime",
+    "build:wasm": "node scripts/build-wasm.mjs",
     "test:rust": "cargo test --workspace",
     "test:database": "python -m unittest discover -s tests/database -v",
     "contracts:check": "pnpm --filter @moesegfault/contracts generate:openapi && git diff --exit-code -- packages/contracts/openapi.json",

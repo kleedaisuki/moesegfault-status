@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # 仍由 review 核验上游 tag、发布说明与完整 SHA。 / Review still verifies the upstream tag, release notes, and full SHA.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "02:00"
+      timezone: Asia/Singapore
+    open-pull-requests-limit: 5

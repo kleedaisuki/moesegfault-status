@@ -1,6 +1,8 @@
 # 本地运行状态和依赖。 / Local runtime state and dependencies.
 .wrangler/
 node_modules/
+# 本地 IDE 状态不属于可复现源码。 / Local IDE state is not reproducible source.
+.idea/
 
 # 本地凭据不得入库。 / Never version local credentials.
 .dev.vars

@@ -1,0 +1,17 @@
+name: Setup Rust WASM toolchain
+description: 安装 stable Rust 与 Cargo.lock 匹配的 wasm-bindgen / Install stable Rust and the wasm-bindgen CLI pinned by Cargo.lock
+runs:
+  using: composite
+  steps:
+    - name: Install stable Rust and WASM target
+      shell: bash
+      run: |
+        rustup set profile minimal
+        rustup toolchain install stable --target wasm32-unknown-unknown
+        rustup default stable
+    - name: Install wasm-bindgen CLI matching Cargo.lock
+      shell: bash
+      run: |
+        version="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/version = |"/, ""); print; exit}' Cargo.lock)"
+        test -n "${version}"
+        cargo install wasm-bindgen-cli --version "${version}" --locked
