@@ -57,7 +57,7 @@ export function renderHealthBanner(checks: ControlPlaneChecks): HTMLElement {
   head.append(title, textElement("span", "eyebrow", "fail closed"));
   const cells = textElement("div", "checks");
   cells.append(
-    checkCell("Access 会话", checks.access),
+    checkCell("管理员会话", checks.access),
     checkCell("Status Admin RPC", checks.rpc),
     checkCell("公开数据新鲜度", checks.freshness),
   );

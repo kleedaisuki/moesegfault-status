@@ -38,6 +38,7 @@ import {
   renderHealthBanner,
   type ControlPlaneChecks,
 } from "./health-view";
+import { authForm } from "./auth-view";
 import "./styles.css";
 
 type NodeChild = Node | string | null | undefined;
@@ -117,7 +118,7 @@ const state: AppState = {
   incidents: [],
   incidentsLoaded: false,
   checks: {
-    access: { state: "checking", detail: "正在验证 Cloudflare Access" },
+    access: { state: "checking", detail: "正在验证管理员会话" },
     rpc: { state: "checking", detail: "正在检查管理 RPC" },
     freshness: { state: "checking", detail: "正在读取公开状态证据" },
   },
@@ -191,9 +192,22 @@ function render(): void {
       "div",
       "identity",
       el("span", "", identityName),
-      el("span", "role", role()),
+      el("span", "role", "管理员"),
     ),
   );
+  const logout = el("button", "", "退出登录");
+  logout.type = "button";
+  logout.addEventListener("click", async () => {
+    logout.disabled = true;
+    try {
+      await api.logout();
+      window.location.reload();
+    } catch {
+      toast("退出失败，请重试", true);
+      logout.disabled = false;
+    }
+  });
+  top.querySelector(".identity")!.append(logout);
   const banner = renderHealthBanner(state.checks);
   const tabs = el("nav", "tabs");
   tabs.setAttribute("aria-label", "运维视图");
@@ -399,7 +413,7 @@ function renderIssues(): HTMLElement {
   form.append(actions);
   if (!state.principal) {
     submit.disabled = true;
-    actions.append(el("span", "muted", "需要有效 Access 会话"));
+    actions.append(el("span", "muted", "需要有效管理员会话"));
   }
   form.addEventListener("submit", async (event) => {
     event.preventDefault();
@@ -627,7 +641,7 @@ function renderActions(): HTMLElement {
       el(
         "div",
         "panel notice",
-        "当前角色为只读 viewer。界面已禁用变更操作；服务端仍会独立鉴权。",
+        "管理员会话无效。界面已禁用变更操作；服务端仍会独立鉴权。",
       ),
     );
   grid.append(
@@ -753,7 +767,7 @@ function renderCatalog(): HTMLElement {
       el(
         "div",
         "panel notice",
-        "Catalog、监控器与后端注册仅限 admin。状态覆盖允许 operator，但服务端仍会复核权限。",
+        "Catalog、监控器与后端注册需要有效管理员会话；服务端仍会复核权限。",
       ),
     );
 
@@ -1503,19 +1517,18 @@ function checkboxField(
 
 /** 并行加载相互独立的三个健康信号和公共读模型 / Load three independent health signals and public read models. */
 async function bootstrap(): Promise<void> {
+  try {
+    const { data } = await api.session();
+    state.principal = data;
+    state.checks.access = {
+      state: "healthy",
+      detail: `${data.email} · 管理员`,
+    };
+  } catch {
+    showAuthentication();
+    return;
+  }
   render();
-  const session = api.session().then(
-    ({ data }) => {
-      state.principal = data;
-      state.checks.access = {
-        state: "healthy",
-        detail: `${data.email} · ${data.roles.join(", ")}`,
-      };
-    },
-    (error) => {
-      state.checks.access = { state: "failed", detail: errorMessage(error) };
-    },
-  );
   const health = api.health().then(
     ({ data }) => {
       const healthy =
@@ -1569,7 +1582,7 @@ async function bootstrap(): Promise<void> {
     },
     (error) => toast(`Incident 列表：${errorMessage(error)}`, true),
   );
-  await Promise.allSettled([session, health, platform, services, incidents]);
+  await Promise.allSettled([health, platform, services, incidents]);
   render();
   window.setInterval(() => {
     refreshDiagnosticFreshness(shell);
@@ -1586,6 +1599,16 @@ async function bootstrap(): Promise<void> {
       render();
     }
   }, 15_000);
+}
+
+/** 未认证时只渲染认证表单，不预取管理数据。 / Render only authentication and avoid management prefetch before login. */
+function showAuthentication(): void {
+  shell.replaceChildren(
+    authForm(async (password) => {
+      await api.login(password);
+      await bootstrap();
+    }),
+  );
 }
 
 void bootstrap();

@@ -123,8 +123,27 @@ const writeHeaders = {
   "x-moesegfault-csrf": "1",
 } as const;
 
+/** 认证写入允许空成功响应；错误永远不包含响应正文或秘密。 / Auth writes accept empty success and never expose response bodies or secrets. */
+async function authenticate(
+  action: "login" | "logout",
+  body: unknown,
+): Promise<void> {
+  const response = await fetch(`/api/auth/${action}`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: writeHeaders,
+    cache: "no-store",
+    signal: AbortSignal.timeout(15_000),
+    body: JSON.stringify(body),
+  });
+  if (!response.ok)
+    throw new ApiError("身份验证失败，请重试", response.status, null);
+}
+
 /** 可供 UI 调用的、严格解码后的 API / Strictly decoded API surface consumed by the UI. */
 export const api = {
+  login: (password: string) => authenticate("login", { password }),
+  logout: () => authenticate("logout", {}),
   catalogSnapshot: (
     kind: "service" | "component" | "retention" | "activation",
     id: string,

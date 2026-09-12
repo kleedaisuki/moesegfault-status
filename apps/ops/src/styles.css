@@ -618,3 +618,19 @@ textarea {
     }
   }
 }
+
+/* 聚焦单管理员登录，不改变原控制台布局。 / Focused owner authentication without changing console layout. */
+.auth-panel {
+  width: min(100%, 30rem);
+  margin: 4rem auto;
+}
+.auth-panel form {
+  display: grid;
+  gap: 1rem;
+}
+.auth-panel input {
+  width: 100%;
+}
+.identity {
+  flex-wrap: wrap;
+}

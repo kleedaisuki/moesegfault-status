@@ -48,3 +48,46 @@ describe("UI transport boundary", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 });
+
+/** 所有认证写入使用相同 CSRF 和同源会话边界。 / All auth mutations share the CSRF and same-origin session boundary. */
+describe("authentication transport", () => {
+  it("sends login/logout JSON with no secret URL", async () => {
+    const fetcher = vi
+      .fn()
+      .mockImplementation(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetcher);
+    await api.login(" password unchanged ");
+    await api.logout();
+    expect(fetcher.mock.calls.map(([url]) => url)).toEqual([
+      "/api/auth/login",
+      "/api/auth/logout",
+    ]);
+    for (const [, init] of fetcher.mock.calls)
+      expect(init).toMatchObject({
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          "content-type": "application/json",
+          "x-moesegfault-csrf": "1",
+        },
+      });
+    expect(JSON.parse(fetcher.mock.calls[0]![1].body)).toEqual({
+      password: " password unchanged ",
+    });
+  });
+  it("does not reflect authentication error responses", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          new Response("private auth diagnostics", { status: 401 }),
+        ),
+    );
+    await expect(api.login("wrong")).rejects.toMatchObject({
+      message: "身份验证失败，请重试",
+      status: 401,
+    });
+  });
+});
