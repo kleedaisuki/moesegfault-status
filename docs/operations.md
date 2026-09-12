@@ -101,7 +101,7 @@ Notifications are not a public cache invalidation protocol. Public reads rely on
 ```bash
 pnpm exec wrangler d1 migrations list moesegfault-status --remote
 pnpm exec wrangler d1 migrations apply moesegfault-status --remote
-pnpm exec wrangler d1 execute moesegfault-status --remote --command "PRAGMA foreign_key_check; PRAGMA integrity_check;"
+pnpm exec wrangler d1 execute moesegfault-status --remote --command "PRAGMA foreign_key_check; PRAGMA quick_check;"
 ```
 
 在 staging 先执行并跑 smoke tests，再由 environment 审批 production。应用前记录 D1 Time Travel bookmark/当前时间与 schema version；D1 Time Travel 默认开启，可按分钟恢复，当前生产存储保留窗口最长 30 天。[D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)

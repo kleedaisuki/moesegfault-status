@@ -1,0 +1,39 @@
+name: Migrate and verify production D1
+
+# 仅显式触发；迁移和验证失败时不继续发布。 / Explicit dispatch only; migration or verification failure blocks rollout.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-d1-migration
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: production-database
+    env:
+      CI: "true"
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/setup-js
+      - name: Test local migration invariants
+        run: python -m unittest discover -s tests/database -v
+      - name: Record recovery bookmark before changes
+        run: pnpm exec wrangler d1 time-travel info moesegfault-status --json
+      - name: Apply numbered migrations
+        run: pnpm exec wrangler d1 migrations apply moesegfault-status --remote
+      - name: Verify actual remote integrity and migration ledger
+        run: |
+          pnpm exec wrangler d1 execute moesegfault-status --remote --command 'PRAGMA foreign_key_check; PRAGMA quick_check; SELECT name FROM d1_migrations ORDER BY id;' --json > "$RUNNER_TEMP/d1-verification.json"
+          node scripts/release/verify-d1.mjs "$RUNNER_TEMP/d1-verification.json"
+          echo 'D1 migration ledger, foreign keys and integrity verified.' >> "$GITHUB_STEP_SUMMARY"
