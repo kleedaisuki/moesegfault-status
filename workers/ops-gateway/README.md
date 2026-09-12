@@ -1,5 +1,7 @@
 # moeSegFault Ops Gateway
 
+实现入口为 `crates/ops-gateway-worker`，业务位于 `crates/status-backend/src/gateway`；此目录仅保留平台配置与说明。通过 `status-build --service ops` 生成 `dist/rust/ops/ops.js`，再走 Rust 发布门禁。 / Implementation lives in the Rust crates; this directory contains platform configuration and documentation. Build with `status-build --service ops`, then use the Rust release gates.
+
 `ops-gateway` 是 `ops.moesegfault.dev` 的唯一管理 HTTP 边界。它验证 Cloudflare Access assertion，把身份规范化为最小 `AdminPrincipal`，并通过私有 Service Binding 调用 `status` 的具名 `AdminRpc`。`status` 不公开管理 HTTP 路由，并在领域层再次授权。
 
 `ops-gateway` is the sole administrative HTTP boundary for `ops.moesegfault.dev`. It verifies the Cloudflare Access assertion, normalizes identity into a minimal `AdminPrincipal`, and invokes named `AdminRpc` methods on `status` through a private Service Binding. `status` exposes no administrative HTTP routes and reauthorizes every operation in the domain layer.

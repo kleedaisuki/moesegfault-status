@@ -46,10 +46,13 @@ Cloudflare 建议 origin 验证 `Cf-Access-Jwt-Assertion`，核验签名、issue
 
 ## 2. Cloudflare 资源初始化 / Resource provisioning
 
+已确认远端 D1 应用 8 个迁移；应用尚未完成云端发布，R2 尚未开通。以下是缺失资源的受审阅操作清单，不是要求重复创建现有资源；R2 开通可能涉及计费，必须另行确认。 / Eight remote D1 migrations are confirmed applied; application cloud release and R2 provisioning remain outstanding. Provision only missing resources after review; R2 billing requires separate confirmation.
+
 以下命令只展示资源名，不含 credential。用个人 SSO 或临时最小权限 API token 执行；记录命令输出与变更单。
 
 ```bash
-pnpm exec wrangler d1 create moesegfault-status
+# 已存在的数据库不要重复创建。 / Do not recreate the existing database.
+# pnpm exec wrangler d1 create moesegfault-status
 pnpm exec wrangler queues create moesegfault-status-diagnostics
 pnpm exec wrangler queues create moesegfault-status-diagnostics-dlq
 pnpm exec wrangler r2 bucket create moesegfault-observability
@@ -88,9 +91,9 @@ Telemetry credentials are resolved from matching keys inside the `TELEMETRY_AUTH
 
 Create both notification queues before deployment and verify their configured names. Messages contain only event identity/type and aggregate identity, never private outbox payloads, locators, or principals.
 
-`outbox.delivered` 表示 Queue 已接受消息，**不表示 webhook 已完成处理**。接收方必须按 `Idempotency-Key` 原子去重，再返回成功状态；网络不确定性和重放会产生重复投递。固定 HTTPS webhook 禁止重定向，每次请求 5 秒超时，非成功响应保留原事件 ID 重试；超过 8 次重试进入通知 DLQ。须独立监控通知积压与 DLQ，并以故障 canary 验证重试和去重，不能只查看 D1 outbox 清空。
+`outbox.delivered` 表示 Queue 已接受消息，**不表示 webhook 已完成处理**。接收方必须按 `Idempotency-Key` 原子去重，再返回成功状态；网络不确定性和重放会产生重复投递。固定 HTTPS webhook 禁止重定向，每次请求 5 秒超时，非成功响应保留原事件 ID 重试；达到配置的总尝试上限（当前 5 次，即最多 4 次重试）进入通知 DLQ。须独立监控通知积压与 DLQ，并以故障 canary 验证重试和去重，不能只查看 D1 outbox 清空。
 
-`outbox.delivered` means Queue acceptance, not webhook completion. The receiver must atomically deduplicate `Idempotency-Key` before acknowledging success. Requests use a pinned HTTPS destination, reject redirects, time out after five seconds, and retain event IDs across retries. After eight retries, the configured notification DLQ retains failures. Monitor backlog and DLQ separately and test the complete failure/replay path.
+`outbox.delivered` means Queue acceptance, not webhook completion. The receiver must atomically deduplicate `Idempotency-Key` before acknowledging success. Requests use a pinned HTTPS destination, reject redirects, time out after five seconds, and retain event IDs across retries. At the configured total-attempt limit (currently five attempts, at most four retries), the notification DLQ retains failures. Monitor backlog and DLQ separately and test the complete failure/replay path.
 
 通知不是公共缓存失效协议。当前读取以 D1 快照与显式 freshness 为准；不得把 webhook 成功当作所有客户端缓存已刷新。
 
@@ -134,7 +137,7 @@ curl --fail-with-body 'https://ops.moesegfault.dev/api/services' \
   --data-binary @service-command.json
 ```
 
-浏览器/运维客户端必须提供 Access session；禁止把 Access JWT 复制进示例或 shell history。命令 body 以 `packages/contracts/src/admin.ts` 为唯一事实来源，并满足：
+浏览器/运维客户端必须提供 Access session；禁止把 Access JWT 复制进示例或 shell history。命令 body 参照 `packages/contracts/src/admin.ts` 和生成的 OpenAPI；Rust 服务端独立执行权威校验，并满足：
 
 1. 每个 `command_id` 是新 UUIDv7；相同 command/body 可安全重放，相同 ID/不同 body 是冲突。
 2. 先注册依赖目标；禁止 self-dependency。
@@ -170,52 +173,31 @@ curl --fail-with-body 'https://ops.moesegfault.dev/api/retention-policy-assignme
 
 ## 4. 发布与来源证明 / Release and provenance
 
-CI 固定 Node 24、pnpm 12.4.1、stable Rust、Cargo.lock 对应的 `wasm-bindgen-cli`，执行 native tests、fmt、Clippy、WASM、OpenAPI、SQL、TypeScript、Worker dry-run 与 Ops Vite build。第三方 GitHub Actions 均固定完整 commit SHA。
+构建与发布业务由原生 Rust `status-build` / `status-release` 执行；Node 仅运行官方 Wrangler 与前端工具。状态后端入口为 `dist/rust/status/status.js`，包含公开和私有 AdminRpc 两套 SDK 模块。 / Native Rust owns build/release orchestration; Node runs official Wrangler and frontend tools. The status entrypoint assembles public and private SDK modules.
 
-生产发布配置不得含 secret。它声明已构建入口和所有 source map；入口必须也是 artifact。每个 Manifest 恰好有一个 `binary`/`other` runtime artifact，其 digest 等于顶层 `artifact_digest`；JavaScript runtime 必须声明相邻 `<entrypoint>.map`，且入口包含对应 `sourceMappingURL`：
+发布配置不含 secret，必须包含所有实际运行模块、对应 JavaScript source map 与 WASM 调试符号。不要手写只含一个 JS 文件的旧清单；通过构建工具合并非秘密 metadata 与真实 artifact inventory。 / Release configuration contains no secrets and inventories every runtime module plus genuine source maps/debug symbols. Generate the inventory instead of copying a single-JavaScript-artifact example.
 
-```json
-{
-  "deployment_id": "0199d09a-b692-7ce0-a1c0-5138a43d7402",
-  "service_name": "status",
-  "environment": "production",
-  "service_version": "1.2.3",
-  "repository_url": "https://github.com/OWNER/REPOSITORY",
-  "git_ref": "refs/tags/v1.2.3",
-  "deployed_at": "2026-09-12T08:00:00.000Z",
-  "ci_provider": "github-actions",
-  "ci_run_id": "1234567890",
-  "release_attempt": "1",
-  "region": ["global"],
-  "artifacts": [
-    {
-      "path": "dist/worker.js",
-      "kind": "other",
-      "media_type": "text/javascript"
-    },
-    {
-      "path": "dist/worker.js.map",
-      "kind": "source_map",
-      "media_type": "application/json"
-    }
-  ],
-  "wrangler_config": "wrangler.jsonc",
-  "wrangler_entrypoint": "dist/worker.js",
-  "require_source_map": true
-}
+```sh
+# metadata 包含独立部署 ID、服务/环境、Git/CI 来源及固定时间；不含密钥。
+# Metadata contains deployment/service/environment, Git/CI provenance and fixed timestamps, never secrets.
+cargo run --locked -p status-build -- --service status --release-template release.metadata.json
+cargo run --locked -p status-release -- --config release.status.json --verify-only
+cargo run --locked -p status-release -- --config release.status.json --dry-run
 ```
+
+完整配置与首次双阶段引导见 [Rust 发布说明](../scripts/release/rust-release-README.md)。这些命令不是已执行云端部署的记录。 / See the Rust release runbook for configuration and two-stage bootstrap; these commands are instructions, not deployment evidence.
 
 `deployed_at`、`ci_provider` 与 `ci_run_id` 必须在第一次注册前冻结。`release_attempt` 不进入 immutable Manifest：同一 attempt 的网络重试必须复用它；只有服务器报告 upload session 已过期时才递增并重新运行。否则相同 `deployment_id` 会因 Manifest 内容变化而正确返回 409。GitHub runner 还会强制 `repository_url` 匹配 `GITHUB_REPOSITORY`，且 `git_ref` 必须解析到当前 HEAD。
 
 ```bash
 # 本地只校验并输出 canonical manifest；不访问网络、不部署。
-pnpm exec tsx scripts/release/deploy.ts --config release.production.json --verify-only
+cargo run --locked -p status-release -- --config release.status.json --verify-only
 
 # 受审批 runner：秘密只存在环境中。
 export MOE_RELEASE_API_URL='https://status.moesegfault.dev'
 export MOE_MACHINE_JWT='<short-lived token>'
 export CLOUDFLARE_API_TOKEN='<least-privilege token>'
-pnpm exec tsx scripts/release/deploy.ts --config release.production.json
+cargo run --locked -p status-release -- --config release.status.json
 ```
 
 脚本顺序固定为：SHA-256 exact bytes → 注册 immutable manifest → 为每个 artifact 建立受限上传 session → PUT → HEAD/metadata/digest commit → 幂等重读必须为 `ready` → `wrangler deploy --no-bundle --upload-source-maps --strict`。受 `If-None-Match: *` 保护的 PUT 返回 412 表示相同内容寻址 key 已存在，客户端继续 commit，由服务端 HEAD/digest 做权威验证，绝不覆盖。最后一步显式传入同一 `DEPLOYMENT_ID`、`GIT_COMMIT`、`ARTIFACT_DIGEST`、`STATUS_VERSION` 与 `ENVIRONMENT`，使 runtime telemetry 与注册表同源。任何失败都会阻止 Wrangler；不得以 `--no-bundle` 外的二次构建替换已登记字节。Cloudflare 也明确把 `--dry-run --outdir` 定位为上线前取得 bundle/source map 的阶段。[Wrangler deploy commands](https://developers.cloudflare.com/workers/wrangler/commands/workers/)

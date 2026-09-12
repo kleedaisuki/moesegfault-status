@@ -2,8 +2,8 @@
 
 ## 运行时边界 / Runtime boundaries
 
-- Stable Rust `status-domain` 是无 I/O 的确定性领域核心，编译为 WASM；TypeScript Worker 负责认证、D1、Queue、R2 和调度。领域规则不在 TypeScript 再实现一份。 / Stable Rust owns deterministic domain rules compiled to WASM; TypeScript owns platform I/O without duplicating those rules.
-- `@moesegfault/contracts` 的严格 Zod schema 同时生成 OpenAPI 3.1.1；管理员 RPC 和 Ops 客户端共享这些类型。 / Strict Zod schemas generate OpenAPI 3.1.1 and are shared across admin RPC and Ops.
+- Stable Rust `status-domain` 是无 I/O 领域核心；`status-backend` 以 Rust 直接调用领域规则并实现认证、D1、Queue、R2 和调度。TypeScript 只承担前端、契约与测试驱动，不承担后端平台适配。 / Rust implements both pure domain rules and backend platform I/O; TypeScript remains frontend, contracts and test drivers.
+- `@moesegfault/contracts` 的严格 Zod schema 生成 OpenAPI 3.1.1，服务于前端与契约测试；Rust 后端独立执行类型和运行时验证，不能把前端校验当成安全边界。 / Zod schemas generate OpenAPI for the frontend and contract tests; the Rust backend independently enforces validation and authorization.
 - `AdminRpc` 是具名 Service Binding 入口，不挂载在 status 公网 HTTP 上。Gateway 验证 Access JWT，status 再执行领域授权。 / AdminRpc is a named private entrypoint; Access authentication and domain authorization remain separate checks.
 - 一个 D1 数据库承载领域事务。使用 `D1Database.batch()` 原子提交，不能把跨多次 await 的读改写假装成事务。并发更新必须由数据库内的版本/幂等门控保护。 / One D1 database owns domain transactions; atomic batches require in-database revision/idempotency guards.
 - 完整状态评估使用单例单调 `evaluation_generation`（评估代数）保护“读取全部输入 → 纯函数规划 → 原子提交”。所有 guard 必须排在 batch 的领域写入之前；Issue、monitor checkpoint、维护、覆盖、目录与 `current_statuses` 等真实输入通过 trigger 推进代数，audit/outbox 不推进。全局 guard 会使无关目标的并发变更保守地重试，但 D1 单写者和当前数据量下，这比易漏依赖的逐目标版本简单且可审计；若实测争用显著，再以冲突率与写负载证据演进为逐目标代数。 / Complete status evaluation uses a singleton monotonic `evaluation_generation` to protect read-all-inputs → pure planning → atomic commit. Every guard precedes domain writes; triggers advance the generation for actual inputs, not audit/outbox. This global guard may conservatively retry on an unrelated target change, but under D1's single-writer model and present volume it is simpler and safer than dependency-prone per-target epochs. Move to per-target generations only if measured conflict and write-load evidence justifies it.

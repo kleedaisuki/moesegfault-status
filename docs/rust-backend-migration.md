@@ -1,55 +1,66 @@
-# Rust 后端迁移 / Rust backend migration
+# Rust 后端架构与验收 / Rust backend architecture and acceptance
 
-## 不可缩减的目标 / Full acceptance target
+## 语言边界 / Language boundary
 
-后端应用逻辑全部使用 Rust；TypeScript 保留给运维前端。生成的 Workers SDK JavaScript 胶水不是手写业务层。 / All backend application logic must be Rust; TypeScript remains for the operations frontend. SDK-generated JavaScript is not a handwritten business layer.
+全部后端应用逻辑使用 Rust；TypeScript 用于运维前端、前端契约和非生产测试驱动。官方 SDK 生成的 JavaScript 负责平台 ABI（Application Binary Interface）衔接，不是手写业务层。旧 TypeScript 适配器与领域调度桥不属于目标架构，也不要求保留旧实现兼容层。 / All backend application logic is Rust. TypeScript remains for the frontend, its contracts and non-production test drivers. SDK-generated JavaScript bridges the platform ABI, not business logic; legacy adapters and dispatch bridges are not part of the target architecture.
 
-此前 TypeScript Worker + Rust 领域桥接的实现决策已被此要求取代。当前迁移未完成，不得以新增 Rust 库、通过原生测试或保留 TypeScript 转发层宣告完成。 / This supersedes the previous TypeScript Worker plus Rust domain bridge decision. Adding a Rust library, passing native tests, or retaining a TypeScript forwarding layer does not constitute completion.
+## 模块与权限 / Modules and authority
 
-## 覆盖清单 / Coverage inventory
+```text
+TypeScript Ops UI -> Rust ops-gateway-worker
+                          | Access + Origin/CSRF + fixed RPC method
+                          v
+                 same status Worker / 同一 Worker
+                 +-------------------------------------+
+Public HTTP ---->| status-worker: fetch/queue/scheduled |
+Private binding >| admin-rpc-worker: named AdminRpc     |
+                 +------------------+------------------+
+                                    v
+                     status-backend -> status-domain
+                         | D1 / Queue / R2 / telemetry
+                         v
+                      Rust probe-worker (private)
+```
 
-| 范围 / Scope            | 必须保留的行为 / Required behavior                                                                                                    | 状态 / State                                                                                                                                                                                                       |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| status-domain           | 评估、生命周期、依赖、恢复、来源校验；Rust 直接调用 / evaluation, lifecycle, dependencies, recovery, provenance; direct Rust calls    | 现有库可复用；桥接待删除 / library reusable; bridge removal pending                                                                                                                                                |
-| platform                | JWT、权限、请求边界、遥测、事务、通知 / JWT, authorization, request limits, telemetry, transactions, notifications                    | Rust 请求边界、机器 JWT、固定 JWKS 获取/缓存已实现并通过 workerd；其余待迁移 / Rust request boundary, machine JWT and pinned JWKS fetch/cache verified in workerd; remainder pending                               |
-| public                  | 六个公开查询入口、分页、状态新鲜度、错误响应 / six public reads, pagination, freshness, errors                                        | 六个公开查询、签名分页及直接 Rust 依赖计算已通过 workerd；遥测接线待平台模块迁移 / All six reads, pagination and direct Rust dependency evaluation verified in workerd; telemetry wiring awaits platform migration |
-| admin                   | 所有管理读写、原子审计/outbox、命名私有入口 / all admin reads/writes, atomic audit/outbox, named private entrypoint                   | 待迁移 / pending                                                                                                                                                                                                   |
-| deployments             | 注册、产物上传/提交、可发布门禁 / registration, artifact upload/commit, readiness gates                                               | 待迁移 / pending                                                                                                                                                                                                   |
-| diagnostics/evidence    | 摄入、消费、幂等、恢复证据、保留清理 / ingestion, consumption, deduplication, recovery evidence, retention                            | 待迁移 / pending                                                                                                                                                                                                   |
-| scheduling              | 租约、调度、区域执行、原子评估、重评投递 / leases, scheduling, regional execution, atomic evaluation, reevaluation                    | 待迁移 / pending                                                                                                                                                                                                   |
-| ops-gateway             | Access、角色映射、CSRF/origin、安全私有调用 / Access, role mapping, CSRF/origin, private calls                                        | Access 与角色映射已迁移并通过 workerd；路由/CSRF/私有调用待迁移 / Access and roles verified in workerd; routing/CSRF/private calls pending                                                                         |
-| probe-executor          | HTTP/TCP/DNS/RPC/synthetic、目标策略、真实执行来源 / probes, target policy, real execution provenance                                 | 待迁移 / pending                                                                                                                                                                                                   |
-| shared backend packages | 后端契约、遥测及诊断辅助逻辑 / backend contracts, telemetry, diagnostic helpers                                                       | 待迁移；前端类型不算后端 / pending; frontend types are not backend                                                                                                                                                 |
-| build/release           | 三个 Rust Worker 构建、产物/符号、GitHub Actions、首次引导 / three Rust builds, artifacts/symbols, Actions, bootstrap                 | Rust WASM 编译检查已加入 CI；其余待迁移 / WASM compilation gate added; remainder pending                                                                                                                           |
-| removal                 | 删除手写 TS 后端及 domain-wasm 桥，清理旧配置和说明 / remove handwritten TS backend and domain-wasm bridge, update configuration/docs | 待全部替换后执行 / pending replacement                                                                                                                                                                             |
+`status-build` 将两个独立 SDK 模块组装为同一个 status Worker 的模块图（Module Graph）：公开默认入口与命名 `AdminRpc` 分别导出，不能把含管理方法的同一个类同时别名为 default。命名入口不意味着新增一个 Worker 或另设 D1 权威源；私有管理能力也不是公网 HTTP 隧道。 / `status-build` assembles separate SDK modules into one status Worker: the public default export and named `AdminRpc` are distinct. Never alias a management-bearing class as the default. Named RPC does not introduce another Worker, database authority or public HTTP tunnel. [Cloudflare RPC](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/rpc/)
 
-## 验收证据 / Acceptance evidence
+| Rust 范围 / Scope                                                                 | 实现位置 / Implementation                                                 |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| 领域规则、直接依赖计算 / Domain and dependency evaluation                         | `status-domain`                                                           |
+| JWT、Access、请求限制、游标 / Authentication and boundaries                       | `status-backend/{auth,access,http,cursor,wire}`                           |
+| 六个公开查询 / Six public reads                                                   | `status-backend/public`                                                   |
+| 管理读写、审计、幂等和原子 outbox / Admin, audit, deduplication and atomic outbox | `status-backend/admin`                                                    |
+| 诊断、证据查询与恢复 / Diagnostics, evidence and recovery                         | `status-backend/{diagnostics,evidence}`                                   |
+| 租约、评估、调度与探测 / Leases, evaluation, scheduling and probes                | `status-backend/{scheduling,probes}`                                      |
+| 注册、上传、ready 与首次引导 / Registration, artifacts, readiness and bootstrap   | `status-backend/{deployments,bootstrap}`                                  |
+| 遥测与通知 / Telemetry and notifications                                          | `status-backend/{telemetry,notifications}`                                |
+| 平台入口 / Platform entrypoints                                                   | `status-worker`, `admin-rpc-worker`, `ops-gateway-worker`, `probe-worker` |
+| 原生构建与发布工具 / Native build and release tools                               | `status-build`, `status-release`                                          |
 
-- API、错误码、JSON 字段、队列载荷、D1 schema 与安全边界不因语言更换而退化。 / Preserve API, errors, JSON, queue payloads, D1 schema and security boundaries.
-- 保留已应用的 8 个 D1 迁移，不重建数据库，不删除触发器。 / Preserve all eight applied D1 migrations; no database rebuild or trigger removal.
-- 原生测试 + WASM 构建 + 实际 workerd 集成 + 云端测试；原生通过不能证明平台行为。 / Native tests, WASM builds, actual workerd integration and cloud tests; native success does not prove platform behavior.
-- 核验私有 AdminRpc、JWT 拒绝路径、D1 回滚、重复消息、超时取消和遥测关联。 / Verify private AdminRpc, JWT rejection, D1 rollback, duplicate messages, cancellation and telemetry correlation.
-- 完成前扫描部署入口、依赖图和手写后端源文件；不得仅依据文件扩展名或测试数量。 / Audit deployment entrypoints, dependencies and handwritten backend sources, not just extensions or test counts.
+模块存在不是验收通过的充分条件；最终集成以当前测试与发布检查实际结果为准。 / Module presence is not proof of acceptance; current integration tests and release checks remain authoritative.
 
-SDK 依据 / SDK reference: [Cloudflare workers-rs](https://github.com/cloudflare/workers-rs), 当前固定 / pinned `worker = 0.8.5`.
+## 平台互操作风险 / Platform interoperability risks
 
-## 已执行的认证验收 / Executed authentication acceptance
+- **RPC 不等于普通函数。** Workers RPC 返回可等待对象（Thenable），不能要求其原生 `Promise` 品牌；调用代理方法时也不能误把 `.call` 当作本地方法。必须在真实 workerd 中验证成功返回、异常、命名与默认入口隔离。 / RPC results may be thenables rather than native Promise instances; proxy invocation must not accidentally address a remote `.call`. Test successful calls, errors and entrypoint isolation in actual workerd.
+- **Map 不等于 JSON 对象。** `serde_wasm_bindgen` 默认将 map 序列化为 JS Map；JSON/RPC/Queue 平台对象边界需要明确 `Serializer::json_compatible()`，否则可能丢字段。不能凭 Rust 类型检查证明跨语言载荷正确。 / Default map serialization produces JS Map, not a plain JSON object. Use explicit JSON-compatible serialization at relevant boundaries and test field preservation. [Serde serializer](https://docs.rs/serde-wasm-bindgen/latest/serde_wasm_bindgen/struct.Serializer.html)
+- **重定向会改变信任目标。** 固定 JWKS、带凭据证据查询、通知和产物上传不能依赖默认重定向行为；测试须覆盖重定向拒绝、请求及响应体截止时间，避免凭据转发。 / Redirects change trust destinations. Pinned JWKS, authenticated evidence, notifications and uploads require explicit redirect handling and request/body deadlines, rather than default behavior. [Workers Request](https://developers.cloudflare.com/workers/runtime-apis/request/)
+- **D1 批处理才是提交边界。** 参数类型和可失败行解码避免精度丢失及 SDK 泛型解码 panic；读取后写入需版本/评估代数门控，领域状态、audit/outbox 和成功幂等快照一批提交。 / Typed parameters and fallible decoding avoid precision loss and panics. Reads followed by writes require revision/generation guards; domain state, audit/outbox and successful replay snapshots commit atomically. [D1 batch](https://developers.cloudflare.com/d1/worker-api/d1-database/)
+- **双模块不是免费隔离。** 两套 WASM 实例可能增加代码、线性内存（Linear Memory）与冷启动（Cold Start）成本；SDK 全局错误监听也不构成故障隔离承诺。必须测最终上传/压缩字节、启动时间及真实负载，不能据语言推断性能更好。 / Two WASM instances can increase code, memory and startup costs. Global SDK error listeners do not promise fault isolation. Measure final bytes, compression, startup and workload behavior rather than assuming Rust is faster.
 
-- `worker-build 0.8.5` 编译真实 Rust 测试 Worker；无手写 TS 后端入口。 / Built a real Rust test Worker, with no handwritten TS backend entrypoint.
-- 5 个 workerd 测试通过；三种机器签名算法、Access 与有界请求体均调用 Rust。 / Five workerd tests pass; all three machine algorithms, Access and bounded bodies execute Rust.
-- 40 个 Rust 单元/集成测试及游标文档测试通过；原生及 wasm32 Clippy 无警告。 / Forty Rust unit/integration tests and cursor doctest pass; native and wasm32 Clippy are warning-free.
-- 三个生产 Worker 的入口仍未切换；不以测试 Worker 替代生产功能。 / The three production entrypoints are not yet switched; a test Worker is not a replacement for production functionality.
+## 构建与发布 / Build and release
 
-## D1 与 Incident 验收 / D1 and Incident acceptance
+`status-build` 调用固定版本的 `worker-build`，保留独立模块目录，组装声明式导出，并将真实 DWARF（Debugging With Attributed Record Formats）符号与运行 WASM 分离。`status-release` 审计实际 Wrangler dry-run 上传字节、来源和符号对应关系，之后执行注册、上传、提交、ready 门禁和部署；注册后禁止重新构建改变字节。 / The native build tool retains separate SDK module directories and genuine debug symbols. The release tool audits actual dry-run bytes and provenance before registration, upload, commit, readiness and deployment; rebuilding after registration is forbidden.
 
-- Rust D1 参数明确区分 NULL、文本、整数、浮点与 BLOB；拒绝整数精度损失。直接使用官方 binding，不经过 REST 或 TS 业务层。 / Rust D1 parameters distinguish NULL/text/integer/real/BLOB and reject integer precision loss; direct official bindings, no REST or TS business layer.
-- 使用可失败行解码，规避 worker 0.8.5 的泛型 results 内部 unwrap；错误不使 isolate panic。 / Fallible decoding avoids worker 0.8.5 generic results unwrap; type errors do not panic the isolate.
-- 10 项真实 workerd 测试通过，包含全部 8 个迁移、事务回滚、参数绑定、Incident 分页、私有组件过滤、响应 schema 校验、错误路由及原有认证测试。 / Ten workerd tests pass, covering all eight migrations, rollback, parameter binding, Incident pagination/redaction/schema/errors and authentication.
-- 两个 Incident 生产逻辑接口已由 Rust 测试 Worker 执行；生产入口切换仍待其余模块完成。 / Both Incident production handlers execute in a Rust test Worker; production entrypoint switch awaits remaining modules.
+首次引导不是跳过安全检查：注册 API 仍验证机器 JWT，其余业务入口保持不可用；部署成功后还需要烟雾测试（Smoke Test）与独立 Access 管理员激活。 / Bootstrap does not bypass authentication: registration still requires machine JWT, other business entrypoints remain unavailable, and deployment requires subsequent smoke tests and separate Access-admin activation. See [release runbook](../scripts/release/rust-release-README.md).
 
-## 六个公开查询的 Rust 验收 / Six public Rust reads
+## 证据与尚未证明的事项 / Evidence and limits
 
-- 已实现 `/v1/status`、`/v1/services`、`/v1/services/{service_name}`、`/v1/incidents`、`/v1/incidents/{incident_id}`、`/v1/maintenance-windows`。全部由 Rust 测试 Worker 调用真实 D1。 / All six routes execute Rust against actual local D1 through the Rust test Worker.
-- 依赖图在单条 SQL 快照内读取，直接调用 `status_domain::compute_dependency_risk`；没有领域 JSON/JS 桥。保留 direct status、dependency risk 与 effective impact 的区分。 / One-statement graph snapshot calls the Rust domain function directly, preserving direct/risk/effective distinctions without a domain JSON/JS bridge.
-- 新增运行时验收：循环依赖、支撑服务影响、过期健康与持久故障、服务分页、维护窗口时间下界固定和私有目标过滤。15 项 Rust workerd 测试通过。 / Runtime coverage includes cycles, supporting services, expired health versus demonstrated failures, service pagination, pinned maintenance scan time and private-target filtering; 15 Rust workerd tests pass.
-- 公开逻辑迁移不等于全部后端完成：管理命令、诊断、调度、队列、产物与遥测平台模块仍未迁移，旧生产入口仍存在。 / Public logic migration is not full backend completion: admin, diagnostics, scheduling, queues, artifacts and telemetry remain, as do legacy production entrypoints.
+| 层级 / Layer                              | 能证明 / Demonstrates                                                 | 不能替代 / Does not replace                                                         |
+| ----------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| Rust 原生测试 / Native tests              | 类型、纯规则和错误路径 / Types, pure rules and failures               | WASM 与平台运行 / Platform execution                                                |
+| SQLite + 全部迁移 / SQLite and migrations | SQL 约束、回滚、并发门控模型 / Constraints, rollback and guards       | 云端 D1 运行特征 / Cloud D1 behavior                                                |
+| 实际本地 workerd / Actual local workerd   | Rust/WASM、D1、JWT、Service Binding 互操作 / Runtime interoperability | 真实 Access、地域、外部服务及云端负载 / Cloud identity, geography, vendors and load |
+| Wrangler dry-run / Dry-run                | 模块可组装与真实上传字节审计 / Assembly and upload-byte audit         | 已部署、已 ready 或已激活 / Deployment, readiness or activation                     |
+| 云端验收 / Cloud acceptance               | 仅实际执行并留证的路径 / Only executed, recorded paths                | 未测试的功能和配置 / Untested functionality and configuration                       |
+
+远端 D1 的 8 个迁移已应用；这不是 Worker 应用已发布的证明。R2 未开通，不能宣称真实 S3 上传闭环完成；本地多地区元数据夹具也不能证明探针真实异地执行。最终测试数量由统一验收记录收口，本文不维护易失真的累计数字。 / Eight remote D1 migrations are applied, but this does not prove application deployment. R2 is not provisioned, so real S3 delivery is not established. Synthetic regional metadata does not establish geographic execution. Final test counts belong to the consolidated acceptance record, not this evolving document.

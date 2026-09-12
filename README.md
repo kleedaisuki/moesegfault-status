@@ -1,71 +1,64 @@
 # moeSegFault Status
 
-基于 Stable Rust、TypeScript 与 Cloudflare Workers 的运维领域服务。 / An operations-domain service built with Stable Rust, TypeScript, and Cloudflare Workers.
+Rust 实现的 Cloudflare Workers 运维后端，TypeScript 实现的运维前端。 / A Rust Cloudflare Workers operations backend with a TypeScript operations frontend.
 
-**代码实现与本地验收已完成，尚未部署线上服务。远端 D1 仅已创建，迁移没有应用到远端。** / **Implementation and local acceptance are complete; no production Worker is deployed and remote D1 migrations have not been applied.**
+**代码与平台集成正在最终验收；不能把本地测试当作线上部署证明。远端 D1 的 8 个迁移已应用；应用尚未完成云端发布，R2 尚未开通。** / **Final code/platform acceptance is in progress; local tests are not production evidence. Eight remote D1 migrations are applied; application cloud release and R2 provisioning remain outstanding.**
 
 ## 结构 / Structure
 
-| 路径 / Path                  | 职责 / Responsibility                                                                                            |
-| ---------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `crates/status-domain`       | 无 I/O Rust 领域核心、状态机、策略、指纹、来源校验 / Pure Rust domain rules                                      |
-| `packages/domain-wasm`       | Workers WASM 初始化与 JSON 调度桥 / Workers WASM bridge                                                          |
-| `packages/contracts`         | 共享 Zod schema、类型与生成的 OpenAPI 3.1.1 / Shared schemas and generated OpenAPI                               |
-| `packages/telemetry`         | 执行上下文、脱敏、日志、采样与有界导出 / Context, redaction, logs, sampling, bounded export                      |
-| `packages/diagnostic-client` | 资源绑定、脱敏及有界诊断投递客户端 / Resource-bound redacted diagnostic producer                                 |
-| `workers/status`             | 公共 HTTP、私有 AdminRpc、D1/Queue/R2、调度 / Platform adapters and authoritative state                          |
-| `workers/ops-gateway`        | Access JWT、CSRF、管理 Service Binding / Administrative trust boundary                                           |
-| `workers/probe-executor`     | 私有区域探针及真实执行来源校验 / Private regional probes with verified execution provenance                      |
-| `apps/ops`                   | GitHub Pages 无状态管理前端 / Stateless administrative UI                                                        |
-| `migrations`                 | 编号 D1 schema 迁移 / Numbered D1 schema migrations                                                              |
-| `tests/integration`          | 真实 SQLite + Rust WASM 跨模块验证 / Real SQLite and Rust WASM integration tests                                 |
-| `tests/runtime`              | 真实 workerd、D1、WASM、JWT 与 Service Binding 验收 / Real workerd, D1, WASM, JWT and Service Binding acceptance |
-| `scripts/release`            | 来源清单、上传、ready 门禁与发布 / Provenance and readiness-gated release                                        |
+| 路径 / Path                 | 职责 / Responsibility                                                                                                         |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `crates/status-domain`      | 无 I/O 领域规则，后端直接调用 / Pure domain rules called directly by Rust                                                     |
+| `crates/status-backend`     | HTTP、认证、D1、管理、诊断、调度、探针、R2、遥测和通知 / Backend application and platform logic                               |
+| `crates/status-worker`      | status 的公开 HTTP、Queue 与 Cron 入口 / Public HTTP, Queue and Cron entrypoints                                              |
+| `crates/admin-rpc-worker`   | 同一个 status Worker 的独立命名私有 RPC 模块 / Separate named private RPC module in the same status Worker                    |
+| `crates/ops-gateway-worker` | Rust Access/CSRF 管理网关 / Rust administrative trust boundary                                                                |
+| `crates/probe-worker`       | Rust 私有区域探针 / Rust private regional executor                                                                            |
+| `crates/status-build`       | SDK 构建、模块组装、运行字节与调试符号分离 / SDK build, assembly and symbol separation                                        |
+| `crates/status-release`     | 来源、实际上传字节审计、上传及 ready 发布门禁 / Provenance, byte audit, uploads and release gates                             |
+| `apps/ops`                  | TypeScript 运维 UI / TypeScript operations UI                                                                                 |
+| `packages/contracts`        | 前端类型、契约测试与 OpenAPI；不是服务器验证实现 / Frontend types, contract tests and OpenAPI, not server validation          |
+| `migrations`                | D1 schema 迁移 / D1 schema migrations                                                                                         |
+| `tests`                     | Rust、SQLite、workerd 与 TypeScript 测试驱动 / Native, SQLite and workerd validation; TypeScript test drivers                 |
+| `workers`                   | 部署配置和操作说明，不承载 TypeScript 后端业务 / Deployment configuration and runbooks, not TypeScript backend business logic |
+
+生成的 JavaScript 仅用于官方 SDK 胶水与声明式模块导出；没有手写 TypeScript 业务转发层。 / Generated JavaScript is SDK glue and declarative module exports, not a handwritten TypeScript business forwarding layer.
 
 ## 本地开发 / Local development
 
-需要 Node.js 24 或更新版本、pnpm 12.4.1、Python 3.13+、Stable Rust 及平台 C/C++ 链接器。 / Requires Node.js 24+, pnpm 12.4.1, Python 3.13+, Stable Rust, and the platform C/C++ linker.
+需要 Node.js 24+、pnpm 12.4.1、Python 3.13+、Stable Rust、`wasm32-unknown-unknown` 和平台链接器。 / Requires Node.js 24+, pnpm 12.4.1, Python 3.13+, Stable Rust, the WASM target and a platform linker.
 
 ```sh
-# 安装锁定的 JS 依赖。 / Install locked JS dependencies.
 pnpm install --frozen-lockfile
-
-# 编译核心；CLI 版本必须与 Cargo.lock 中的 wasm-bindgen 一致。 / CLI must match wasm-bindgen in Cargo.lock.
-cargo install wasm-bindgen-cli --version 0.2.128 --locked
-node scripts/build-wasm.mjs
-
-# 全部自动检查。 / Automated checks.
+rustup target add wasm32-unknown-unknown
+cargo install worker-build --version 0.8.5 --locked
+# 构建全部 Rust Worker；不是部署。 / Build all Rust Workers, without deploying.
+pnpm build:backend
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-pnpm typecheck
+# 构建真实测试 Worker 后运行平台测试。 / Build actual test Workers before platform tests.
+pnpm build:rust-runtime
 pnpm test
 pnpm test:database
+pnpm typecheck
 pnpm contracts:check
 pnpm openapi:lint
-pnpm format:check
-pnpm build
+pnpm deploy:check
 ```
 
-首次本地运行，在根目录 `.dev.vars` 设置随机 `CURSOR_SIGNING_KEY`（至少 32 字符）。不要使用真实 production 凭据作为本地示例。R2 S3 上传测试另需受限凭据；未配置机器 issuer 的本地环境拒绝公网机器写入。 / Set a random `CURSOR_SIGNING_KEY` of at least 32 characters in ignored `.dev.vars`. Do not copy production credentials for local development. R2 S3 uploads require separately scoped credentials; unconfigured machine authentication fails closed.
+忽略的 `.dev.vars` 只放本地测试配置；`CURSOR_SIGNING_KEY` 至少 32 字符，不复制生产密钥。缺失机器身份配置时拒绝机器写入。Ops 需要同源 Rust gateway 和真实 Access 配置；无依赖时不得伪造登录或绿色健康状态。 / Use ignored `.dev.vars` for local-only configuration, including a random cursor key of at least 32 characters; never copy production secrets. Missing authentication fails closed. Ops requires its same-origin Rust gateway and Access, not simulated login or health.
 
-```sh
-pnpm db:migrate:local
-pnpm --filter @moesegfault/status dev
-pnpm --filter @moesegfault/ops dev
-```
+## 发布与验收 / Release and acceptance
 
-Ops 管理接口需要同源 gateway 和 Access 配置。独立打开 UI 而没有管理网关时，显示“监控系统不可用”是预期行为，不应伪造登录或绿色状态。 / Ops requires the same-origin gateway and Access configuration. An unavailable banner without those dependencies is intentional, not a simulated login or healthy status.
+- [Rust 架构与验证边界 / Rust architecture and evidence](docs/rust-backend-migration.md)
+- [生产运维手册 / Operations](docs/operations.md)
+- [Rust 发布流程 / Rust release](scripts/release/rust-release-README.md)
+- [数据库 / Database](docs/database.md)
+- [实现决策 / Decisions](docs/implementation-decisions.md)
+- 原始需求 / Source requirements: [服务设计](docs/status-design.md)、[可观测性标准](docs/observability-standard.md)
 
-## 发布边界 / Release boundary
-
-- 不直接执行裸 `wrangler deploy` 绕过来源与 ready 门禁。 / Do not bypass provenance/readiness gates with a bare deployment.
-- 本地默认配置不包含真实身份服务、遥测后端或 production 密钥。 / Local defaults do not contain real identity/telemetry services or production secrets.
-- 生产配置与运维流程见 [运行手册](docs/operations.md)。 / See the operations runbook for production configuration.
-- 完整需求见 [服务设计](docs/status-design.md) 与 [可观测性标准](docs/observability-standard.md)。 / The supplied designs remain the authoritative requirements.
-- 数据库不变量和演进验证见 [数据库说明](docs/database.md)。 / Database invariants and migration checks are documented separately.
-- 实现决策及验收边界见 [实现决策](docs/implementation-decisions.md)。 / Implementation decisions distinguish code evidence from production validation.
+D1 保存事务状态；R2 保存产物与符号，二者不是“更顺手”的替代选择。不要裸运行 `wrangler deploy` 绕过来源和 ready 门禁，也不要因配置里存在绑定就认为资源或凭据已可用。 / D1 holds transactional state; R2 holds artifacts and symbols. They are complementary, not interchangeable. Never bypass release gates with bare deployment or infer provisioning from configuration alone.
 
 ## 许可证 / License
 
-GNU General Public License version 3；参见 [LICENSE](LICENSE)。 / GNU General Public License version 3; see LICENSE.
+GNU General Public License version 3；参见 / see [LICENSE](LICENSE).

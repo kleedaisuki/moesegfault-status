@@ -46,37 +46,14 @@ The executor uses resource service name `probe-executor`, independently of the m
 
 执行器使用独立服务名 `probe-executor`。生产来源缺失时在执行前返回 503；只有全部来源为空的明确 development 可以不生成资源遥测。本地默认配置不是生产发布配置。日志与原生 invocation span 绑定上述真实资源；日志只含固定事件、结果和校验后的 correlation/trace，不包含目标 URL、探针正文或凭证。
 
-Run from the repository root, on the clean committed revision to be released:
+从干净、已提交的仓库根构建 Rust 执行器；metadata 的 `service_name` 是 `probe-executor`。实际运行入口为 `dist/rust/probe/probe.js`；构建清单包含全部 SDK 模块、WASM 和调试符号，不能复用单文件 JavaScript 清单。 / Build the Rust executor from a clean committed repository. Metadata uses service name `probe-executor`; the inventory includes all SDK modules, WASM and symbols.
 
-```powershell
-pnpm exec esbuild workers/probe-executor/src/index.ts --bundle --format=esm --platform=browser '--external:cloudflare:*' --sourcemap=external --outfile=workers/probe-executor/dist/executor.mjs
-pnpm exec tsx scripts/release/deploy.ts --config executor-release.json --verify-only
-# Explicit production operation, only after reviewing manifest and deployment authorization:
-pnpm exec tsx scripts/release/deploy.ts --config executor-release.json
+```sh
+cargo run --locked -p status-build -- --service probe --release-template executor.metadata.json
+cargo run --locked -p status-release -- --config release.probe.json --verify-only
+cargo run --locked -p status-release -- --config release.probe.json --dry-run
+# 仅审批后真实发布。 / Actual release only after approval.
+cargo run --locked -p status-release -- --config release.probe.json
 ```
 
-`executor-release.json` is a release input at the repository root, with the same schema as the main service release: `service_name: "probe-executor"`, a new UUIDv7 `deployment_id`, intended `environment`, `service_version`, actual `repository_url`, immutable `git_ref`, fixed `deployed_at`, `ci_provider`, `ci_run_id`, fixed `release_attempt`, and `region`. Set:
-
-```json
-{
-  "wrangler_config": "workers/probe-executor/wrangler.jsonc",
-  "wrangler_entrypoint": "workers/probe-executor/dist/executor.mjs",
-  "require_source_map": true,
-  "artifacts": [
-    {
-      "path": "workers/probe-executor/dist/executor.mjs",
-      "kind": "other",
-      "media_type": "application/javascript"
-    },
-    {
-      "path": "workers/probe-executor/dist/executor.mjs.map",
-      "kind": "source_map",
-      "media_type": "application/json"
-    }
-  ]
-}
-```
-
-The fragment above supplies file declarations, not the complete release config. Register the `probe-executor` service and retention policy first. Supply `MOE_RELEASE_API_URL`, a short-lived `MOE_MACHINE_JWT` scoped to this exact service/environment/deployment, and authorized Cloudflare credentials through CI secrets. The release command registers the immutable manifest, uploads exact bytes with MD5 transport integrity, commits and verifies SHA-256, requires authoritative `ready`, and only then deploys the already-built file using `--no-bundle` and injects provenance vars. Never rebuild between readiness and deployment, bypass this gate with direct `wrangler deploy`, or copy another region's runtime provenance. Each separately built/released regional instance needs its own honest manifest and deployment identity. The source-map size limit remains 8 MiB.
-
-上面的 JSON 仅为完整发布配置中的文件声明片段。先登记服务与保留策略，再使用同一不可变 manifest 流程完成上传、摘要验证、ready 门槛与精确字节部署；严禁绕过发布脚本或在校验后重新构建。各区域发布必须持有与实际运行字节一致的独立部署来源。此前的本地 dry-run 不执行此生产发布过程。
+参见 [Rust 发布流程](../../scripts/release/rust-release-README.md)；本地构建不能证明真实区域部署完成。 / See the release runbook; local builds do not prove geographic deployment.
