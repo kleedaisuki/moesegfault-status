@@ -216,6 +216,22 @@ importers:
         specifier: ^4.1.8
         version: 4.6.2
 
+  packages/diagnostic-client:
+    dependencies:
+      '@moesegfault/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@moesegfault/telemetry':
+        specifier: workspace:*
+        version: link:../telemetry
+    devDependencies:
+      typescript:
+        specifier: 7.0.2
+        version: 7.0.2
+      vitest:
+        specifier: 5.0.0
+        version: 5.0.0(@types/node@24.13.4)(happy-dom@18.0.1)(vite@7.3.6(@types/node@24.13.4)(tsx@4.23.13))
+
   packages/domain-wasm: {}
 
   packages/telemetry:
