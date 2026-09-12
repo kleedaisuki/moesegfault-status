@@ -2,7 +2,7 @@
 
 Rust 实现的 Cloudflare Workers 运维后端，TypeScript 实现的运维前端。 / A Rust Cloudflare Workers operations backend with a TypeScript operations frontend.
 
-**Rust 后端迁移及本地验收已完成；不能把本地测试当作线上部署证明。远端 D1 的 8 个迁移已应用；应用尚未完成云端发布，R2 尚未开通。** / **Rust backend migration and local acceptance are complete; local tests are not production evidence. Eight remote D1 migrations are applied; application cloud release and R2 provisioning remain outstanding.**
+**Rust status bootstrap、Ops 静态 UI、两个自定义域名和管理员 Worker secret 已在云端部署并核验；业务 API 仍以 503 保持引导/来源门禁，尚未完成正式 ready 发布或云端登录验收。** / **Rust status bootstrap, Ops UI, both custom domains and the administrator secret are deployed and checked. Business APIs still return 503 under bootstrap/provenance gates; full readiness-gated release and cloud login remain outstanding.**
 
 统一验收命令与边界见 [Rust 验收记录](docs/rust-acceptance.md)。 / See the [Rust acceptance record](docs/rust-acceptance.md) for consolidated checks and limitations.
 
@@ -14,7 +14,7 @@ Rust 实现的 Cloudflare Workers 运维后端，TypeScript 实现的运维前�
 | `crates/status-backend`     | HTTP、认证、D1、管理、诊断、调度、探针、R2、遥测和通知 / Backend application and platform logic                                                |
 | `crates/status-worker`      | status 的公开 HTTP、Queue 与 Cron 入口 / Public HTTP, Queue and Cron entrypoints                                                               |
 | `crates/admin-rpc-worker`   | 同一个 status Worker 的独立命名私有 RPC 模块 / Separate named private RPC module in the same status Worker                                     |
-| `crates/ops-gateway-worker` | Rust Access/CSRF 管理网关 / Rust administrative trust boundary                                                                                 |
+| `crates/ops-gateway-worker` | Rust owner 会话/CSRF 管理网关 / Rust administrative trust boundary                                                                             |
 | `crates/probe-worker`       | Rust 私有区域探针 / Rust private regional executor                                                                                             |
 | `crates/status-build`       | SDK 构建、模块组装、运行字节与调试符号分离 / SDK build, assembly and symbol separation                                                         |
 | `crates/status-release`     | 来源、实际上传字节审计、上传及 ready 发布门禁 / Provenance, byte audit, uploads and release gates                                              |
@@ -49,7 +49,7 @@ pnpm openapi:lint
 pnpm deploy:check
 ```
 
-忽略的 `.dev.vars` 只放本地测试配置；`CURSOR_SIGNING_KEY` 至少 32 字符，不复制生产密钥。缺失机器身份配置时拒绝机器写入。Ops 需要同源 Rust gateway 和真实 Access 配置；无依赖时不得伪造登录或绿色健康状态。 / Use ignored `.dev.vars` for local-only configuration, including a random cursor key of at least 32 characters; never copy production secrets. Missing authentication fails closed. Ops requires its same-origin Rust gateway and Access, not simulated login or health.
+忽略的 `.dev.vars` 只放本地测试配置；`CURSOR_SIGNING_KEY` 至少 32 字符，不复制生产密钥。缺失机器身份配置时拒绝机器写入。Ops 需要同源 Rust gateway 与预配置 owner 密码会话；无依赖时不得伪造登录或绿色健康状态。 / Use ignored `.dev.vars` for local-only configuration, including a random cursor key of at least 32 characters; never copy production secrets. Missing authentication fails closed. Ops requires its same-origin Rust gateway and preconfigured owner-password session, not simulated login or health.
 
 ## 发布与验收 / Release and acceptance
 
@@ -65,3 +65,9 @@ D1 保存事务状态；R2 保存产物与符号，二者不是“更顺手”�
 ## 许可证 / License
 
 GNU General Public License version 3；参见 / see [LICENSE](LICENSE).
+
+## 单管理员与部署职责 / Single owner and deployment duties
+
+管理员仅一人：预配置密码登录/退出，无注册、setup 或改密 UI，无 Cloudflare Access。`ADMIN_PASSWORD_RECORD` 仅作为 Worker secret；随机密码留在受 OS ACL 保护的本机文件，不进入代码、GitHub 或聊天。本机已上传该 Worker secret 并核验新版本 100% 部署；尚未证明云端登录成功。 / One owner has password login/logout only, without registration, setup, password-change UI or Access. Keep the password local under OS ACLs and the derived record in a Worker secret; secret installation and full version cutover are verified, but successful cloud login is not.
+
+Ops UI 使用同一个 Rust gateway Worker 的 Static Assets，`/api/*` 进入 Rust。GitHub 只发布 Worker 版本；本机 CLI 管理 Custom Domain/触发器，Cloudflare 自动配置对应 DNS 与证书。全部 9 个 D1 迁移已在远端应用且完整性检查通过；`0009` 保存会话摘要与登录预算，不保存密码。 / Ops assets share the Rust gateway Worker, with API paths entering Rust. GitHub publishes versions; local CLI manages domains/triggers. All nine remote migrations and integrity checks passed; migration 0009 stores sessions and login budgets, not passwords.

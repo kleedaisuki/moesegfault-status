@@ -1,35 +1,34 @@
 # moeSegFault Status 生产运维手册 / Production Operations Runbook
 
-> 本文是执行清单，不是“复制后即可上线”的承诺。任何 `REPLACE_ME`、占位 ID、未创建资源、未配置 Access、未连接外部遥测或未演练恢复流程，都会阻断生产发布。
->
-> This is an execution checklist, not a claim of turnkey readiness. Any placeholder, missing resource, unconfigured Access policy, absent telemetry destination, or untested recovery procedure blocks production.
+> 本文是执行清单，不是上线证明。资源、代码、Worker secrets 和真实生产验收必须分别核验；已准备本机文件不等于已上传 Worker secret。 / This is a checklist, not deployment evidence. Verify resources, code, Worker secrets and production behavior independently; a prepared local file is not an uploaded Worker secret.
 
-## 1. 权限与职责 / Access and responsibility
+## 当前云端事实 / Current cloud evidence
 
-| 主体 / Principal           | 最小权限 / Minimum authority                                                                                                    | 禁止事项 / Must not                                     |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------- |
-| GitHub CI                  | 仓库只读；Pages 发布 job 才有 `pages:write` 与 OIDC `id-token:write`                                                            | PR job 不得取得 Cloudflare secret                       |
-| 发布 job                   | 受 GitHub Environment 审批；短期 machine JWT；范围仅含 `deployments:write artifacts:write`；Wrangler token 只管目标 Worker/绑定 | 不使用账户 Global API Key，不把 token 写入 artifact/log |
-| 人类 viewer/operator/admin | Cloudflare Access 登录；角色只按稳定 `sub` 显式映射                                                                             | 不以邮箱、组 claim 或请求头自行提权                     |
-| `ops-gateway`              | 验证 Access assertion，调用私有 `AdminRpc` Service Binding                                                                      | 不公开 status 管理路由，不信任 Access cookie 回退       |
-| status Worker              | D1、主 Queue/DLQ、R2、Analytics Engine（AE）及必要 secret                                                                       | 不向前端返回 object key、凭据或原始遥测                 |
+- 本机 Wrangler 已部署最终 Rust status 的 bootstrap 版本；`ADMIN_PASSWORD_RECORD` secret bulk 成功，平台列表类型为 `secret_text`，secret 更新后的版本已切换 100% 流量。 / Local Wrangler deployed the Rust bootstrap and installed the administrator secret, confirmed as secret_text with a full version cutover.
+- Rust Ops gateway 与 Static Assets 版本已上传；本机 `triggers deploy` 成功绑定 `status.moesegfault.dev` 和 `ops.moesegfault.dev`。HTTPS 公共 JWKS 返回 200 且与仓库公钥完全一致；Ops HTML 返回 200 且 SHA-256 与构建产物一致。 / Both custom domains are bound. HTTPS JWKS matches the repository public keys; served Ops HTML matches the built SHA-256, both returning 200.
+- `/v1/status` 与 `/api/session` 仍返回 503，符合 bootstrap/provenance 门禁；这不是绿色健康或成功登录的证据。 / Status and session APIs still return 503 under bootstrap/provenance gates, not successful health or login.
+- 初次 status 部署在更新空 Cron 配置时遇到 Cloudflare `10063`：账户缺少 workers.dev subdomain。该次脚本与四个 Queue producer 已成功，后续不含 Cron 的域名配置成功；不可把这次部分成功记录成整个部署命令成功。定时器和 Queue consumer 尚未启用。 / Initial deployment partially succeeded: script/producers uploaded, but empty-Cron configuration failed with 10063 because the account lacks a workers.dev subdomain. Subsequent domain configuration without Cron succeeded. Timers and queue consumers remain disabled.
+- S3 签名凭据、通知目标与完整注册/上传/ready 发布仍待完成。R2 对象级验证和静态页面可访问不能替代这些验收。 / S3 signing credentials, notification destinations and the complete registration/upload/readiness release remain outstanding; object checks and reachable static HTML do not replace them.
 
-Cloudflare 建议 origin 验证 `Cf-Access-Jwt-Assertion`，核验签名、issuer 与 application audience；公钥从 team certs endpoint 按 `kid` 轮换读取，而不是硬编码。[Cloudflare Access JWT validation](https://developers.cloudflare.com/cloudflare-one/access-controls/applications/http-apps/authorization-cookie/validating-json/)
+## 1. 权限与职责 / Authority and responsibility
 
-### 1.1 Access 配置
+| 主体 / Principal                    | 最小权限 / Minimum authority                                                                               | 禁止事项 / Must not                                                                                               |
+| ----------------------------------- | ---------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| GitHub CI / release                 | 测试及受控 Worker 版本上传、部署 / Tests and controlled Worker version upload/deployment                   | 不授予 DNS 或 Access 管理权限；不接收管理员密码 / No DNS/Access administration or administrator password          |
+| 单一 owner / Sole owner             | 预配置密码登录与退出，执行管理操作 / Preconfigured password login/logout and administration                | 无公开注册、setup 或改密 UI / No registration, setup or password-change UI                                        |
+| Rust ops-gateway                    | 验证 D1 会话和 Origin/CSRF，调用私有 AdminRpc / Validate sessions and Origin/CSRF, invoke private AdminRpc | 不信任身份请求头，不公开通用 RPC 隧道 / No trusted identity headers or generic RPC tunnel                         |
+| 本机运维 CLI / Local operations CLI | 配置 Worker secret、Custom Domain 与触发器 / Configure secrets, domains and triggers                       | 不把本机管理员密码复制到仓库、GitHub 或聊天 / Never copy the local password into source, GitHub or chat           |
+| status Worker                       | D1、Queue/DLQ、私有 R2 与所需 secret / Domain state, queues, private artifacts and required secrets        | 不向前端返回 object key、凭据或原始遥测 / No credentials, private locators or raw telemetry in frontend responses |
 
-1. 为 `ops.moesegfault.dev` 创建 **Self-hosted Access application**，默认拒绝。
-2. 用 Allow policy 仅允许值班群体，并按组织策略要求 MFA/device posture。不要创建 Bypass policy。
-3. 从 application 复制 64-hex AUD；team origin 必须是精确的 `https://<team>.cloudflareaccess.com`。
-4. 在 `workers/ops-gateway/wrangler.jsonc` 的环境专属配置中替换：
-   - `ACCESS_ISSUER`：精确 team origin；
-   - `ACCESS_AUDIENCE`：单个 application AUD；
-   - `ACCESS_MAX_TOKEN_AGE_SECONDS`：不得超过 Access 会话上限；
-   - `OPS_ORIGIN`：精确 UI origin；
-   - `ACCESS_ROLE_MAPPING`：`{"<stable-sub>":["viewer"]}` 形式，逐人审阅。
-5. 用 viewer/operator/admin 三个测试身份验证正向与越权请求；删除/禁用用户后验证旧会话失效。
+### 1.1 单管理员密码 / Single-administrator password
 
-`ACCESS_ROLE_MAPPING` 不是密码，但包含授权决策；它必须 code review，且每季度与 IdP/值班表对账。Access 角色的粗粒度检查不能代替 status 领域层的二次授权。
+不使用 Cloudflare Access。管理员只有一个 owner，密码事先生成并保存在受操作系统访问控制列表（Access Control List, ACL）保护的本机私密文件中；仓库不记录该文件路径、密码或密码记录。前端只提供登录和退出，没有 setup、注册、账号管理或修改密码入口。 / Cloudflare Access is not used. A single owner uses a pre-generated password retained in an OS-ACL-protected local private file. Neither its path nor the password/record belongs in source. The UI provides login/logout only.
+
+- `ADMIN_PASSWORD_RECORD` 是 Worker secret：PBKDF2-SHA256（Password-Based Key Derivation Function 2），600,000 次迭代、16 字节随机盐、32 字节派生哈希。密码明文不进入 D1、GitHub、构建产物或日志。 / The Worker secret stores a PBKDF2-SHA256 record with 600,000 iterations, a 16-byte random salt and a 32-byte derived hash. Plaintext never enters D1, GitHub, build artifacts or logs.
+- 迁移 `0009_single_administrator.sql` 只增加会话令牌摘要/密码记录指纹/有效期和登录全局预算；不建账号表、不存密码记录。登录预算是全局 10 分钟最多 30 次，不能通过切换 IP 绕过；攻击者耗尽预算仍可造成暂时无法登录，必须监控该可用性风险。 / Migration 0009 stores token hashes, record fingerprints, expiry and a global login budget, not accounts or password records. The 30-attempt/10-minute global budget prevents IP-rotation bypass but can temporarily deny legitimate login if exhausted.
+- 会话有效期 12 小时，cookie 使用 `Secure`、`HttpOnly`、`SameSite=Strict`；退出撤销对应 D1 会话，所有管理 API 仍执行 Origin/CSRF 检查。 / Sessions last 12 hours with Secure, HttpOnly, SameSite=Strict cookies; logout revokes the D1 session, and administrative APIs enforce Origin/CSRF.
+- 改密是本机受控 secret 轮换，不是 UI 操作。将新记录配置到新 Worker 版本后执行 **100% 流量切换**，旧记录指纹对应的会话即失效；渐进混跑旧版本会保留旧会话可用窗口，不能用于即时撤销。 / Password changes are controlled local secret rotations. Deploy the new record/version to 100% of traffic to invalidate old-fingerprint sessions; mixed-version rollouts leave an old-session acceptance window.
+- 本机已完成 status bootstrap 后的 secret bulk 上传；平台 secret list 确认 `ADMIN_PASSWORD_RECORD` 为 `secret_text`，包含该 secret 的最新版本已 100% 部署。此证据不等于云端登录已通过。 / Local secret bulk installation is complete after status bootstrap. The platform lists ADMIN_PASSWORD_RECORD as secret_text and deploys the updated version to 100%; this does not establish successful cloud login.
 
 ### 1.2 机器 JWT（JSON Web Token）
 
@@ -39,24 +38,18 @@ Cloudflare 建议 origin 验证 `Cf-Access-Jwt-Assertion`，核验签名、issue
 - 每 token 绑定一个 `service_name`、`environment`、UUIDv7 `deployment_id`、稳定唯一 `jti`；
 - `exp - iat <= 900s`，最小 scope；发布需要 `deployments:write artifacts:write`，诊断生产者仅需 `diagnostics:write`；
 - 发布脚本启动时 token 至少还剩 10 分钟；先构建产物，再即时换取 token，不要让编译消耗其寿命；
-- 在 CI 中优先以 GitHub OIDC 换取短期 JWT；若暂时只能保存 credential，放在受审批的 GitHub Environment secret，并设轮换/到期告警；
+- 当前 Rust CLI 从 GitHub secret `MACHINE_JWT_PRIVATE_KEY` 在内存签发短期 JWT；私钥和 JWT 不写 artifact/log。GitHub OIDC 交换身份服务并未部署，不把未来方案描述为当前流程。私钥保留在受控 secret 中并安排轮换； / The Rust CLI currently signs short-lived JWTs in memory from MACHINE_JWT_PRIVATE_KEY. Neither key nor JWT is emitted to artifacts/logs. An OIDC exchange service is not deployed; protect and rotate the signing secret.
 - issuer 故障时停止发布，不得扩大时钟偏差、延长 token 或跳过验证。
+
+机器签名私钥与游标签名密钥已生成并保存在 GitHub secrets；文档与审阅只记录名称，不读取或输出值。`config/machine-jwks.json` 只含公钥，将由 Rust 的 well-known 端点公开；公钥公开不是私钥泄漏，也不能替代 issuer/audience 校验。管理员密码独立保存在本机，不存 GitHub。 / Machine signing and cursor secrets are generated and retained in GitHub secrets; record names only. The public-only JWKS file is intended for a Rust well-known endpoint; publishing public keys does not disclose private keys or replace issuer/audience checks. The administrator password remains local, not in GitHub.
 
 这里的 payload 预解析只是客户端的快速失败（fail-fast）；签名与 claim 的权威验证永远在 status Worker。
 
 ## 2. Cloudflare 资源初始化 / Resource provisioning
 
-已确认远端 D1 应用 8 个迁移；应用尚未完成云端发布，R2 尚未开通。以下是缺失资源的受审阅操作清单，不是要求重复创建现有资源；R2 开通可能涉及计费，必须另行确认。 / Eight remote D1 migrations are confirmed applied; application cloud release and R2 provisioning remain outstanding. Provision only missing resources after review; R2 billing requires separate confirmation.
+远端 D1 已真实应用全部 9 个迁移；`verify-d1` 的 `target/d1-auth-verification.json` 记录验证通过，`PRAGMA foreign_key_check` 与 `PRAGMA quick_check` 均无异常。R2 已开通，私有 bucket 已创建，并已执行真实云端 PUT → GET → SHA-256 校验 → DELETE。四个诊断/通知主队列与 DLQ 已创建，四个 producer 绑定已上传；consumer 与定时器尚未启用。应用尚未完成完整生产发布。 / All nine remote D1 migrations are applied; verify-d1 recorded success in target/d1-auth-verification.json, with clean foreign_key_check and quick_check results. R2 is enabled and its private bucket passed an actual cloud PUT/GET/SHA-256/DELETE check. Four diagnostic/notification queues and DLQs exist and four producer bindings are uploaded; consumers and timers are not enabled. Full production application release is not complete.
 
-以下命令只展示资源名，不含 credential。用个人 SSO 或临时最小权限 API token 执行；记录命令输出与变更单。
-
-```bash
-# 已存在的数据库不要重复创建。 / Do not recreate the existing database.
-# pnpm exec wrangler d1 create moesegfault-status
-pnpm exec wrangler queues create moesegfault-status-diagnostics
-pnpm exec wrangler queues create moesegfault-status-diagnostics-dlq
-pnpm exec wrangler r2 bucket create moesegfault-observability
-```
+不要重复创建这些资源。新增资源或更改计费必须另行审阅；真实 R2 对象检查不等于应用的带 JWT 注册、预签名上传及 ready 闭环已在生产验收。 / Do not recreate existing resources. Review new provisioning/billing separately; the R2 object check does not establish the application's authenticated registration/upload/readiness path.
 
 随后把真实 D1 `database_id`、Queue、DLQ、R2 名称写入受审阅的环境配置。Analytics Engine 数据集无需预建：声明 binding 后第一次 `writeDataPoint` 自动创建。[Analytics Engine setup](https://developers.cloudflare.com/analytics/analytics-engine/get-started/)
 
@@ -70,9 +63,10 @@ pnpm exec wrangler r2 bucket create moesegfault-observability
 
 ### 2.1 Secret 清单
 
-通过交互式 stdin 或受保护 CI 注入，绝不放在 `.dev.vars`、JSON、命令行参数、issue、构建 artifact 或 Pages bundle：
+通过交互式 stdin、受保护 CI 或本机 secret bulk 注入。禁止把生产 secret 放入仓库内 `.dev.vars`、仓库/可发布 JSON、命令行参数、issue、构建 artifact 或前端 bundle；受 OS ACL 保护、位于仓库外且不上传 GitHub 的私密 JSON bulk 文件允许作为本机预置材料。 / Inject through stdin, protected CI or local secret bulk input. Production secrets must not enter repository/publishable files, CLI arguments, issues, build artifacts or frontend bundles. An OS-ACL-protected secret bulk JSON file outside the repository and never uploaded to GitHub is permitted for local provisioning.
 
 ```bash
+pnpm exec wrangler secret put ADMIN_PASSWORD_RECORD --config wrangler.jsonc
 pnpm exec wrangler secret put CURSOR_SIGNING_KEY --config wrangler.jsonc
 pnpm exec wrangler secret put R2_ACCESS_KEY_ID --config wrangler.jsonc
 pnpm exec wrangler secret put R2_SECRET_ACCESS_KEY --config wrangler.jsonc
@@ -109,7 +103,7 @@ pnpm exec wrangler d1 execute moesegfault-status --remote --command "PRAGMA fore
 
 在 staging 先执行并跑 smoke tests，再由 environment 审批 production。应用前记录 D1 Time Travel bookmark/当前时间与 schema version；D1 Time Travel 默认开启，可按分钟恢复，当前生产存储保留窗口最长 30 天。[D1 Time Travel](https://developers.cloudflare.com/d1/reference/time-travel/)
 
-不要用 dashboard/ad-hoc SQL 初始化领域行：它会绕过管理 RPC 的 schema、幂等账本和 audit log。保留策略必须通过 Access 保护的 `POST /api/retention-policy-assignments` 原子登记不可变 revision 并绑定服务；数据库 migration 只建立结构，不偷偷写入环境专属领域配置。
+不要用 dashboard/ad-hoc SQL 初始化领域行：它会绕过管理 RPC 的 schema、幂等账本和 audit log。保留策略必须通过 owner 会话保护的 `POST /api/retention-policy-assignments` 原子登记不可变 revision 并绑定服务；数据库 migration 只建立结构，不偷偷写入环境专属领域配置。
 
 ## 3. 目录、策略与监控 bootstrap / Catalog, policy, and monitor bootstrap
 
@@ -127,7 +121,7 @@ diagnostic-policy assignment
 telemetry backend（仅保存 credential 引用）
 ```
 
-使用 Access 保护的同源 Ops API；每个 mutation 带：
+使用 owner 会话保护的同源 Ops API；每个 mutation 带：
 
 ```bash
 curl --fail-with-body 'https://ops.moesegfault.dev/api/services' \
@@ -137,7 +131,7 @@ curl --fail-with-body 'https://ops.moesegfault.dev/api/services' \
   --data-binary @service-command.json
 ```
 
-浏览器/运维客户端必须提供 Access session；禁止把 Access JWT 复制进示例或 shell history。命令 body 参照 `packages/contracts/src/admin.ts` 和生成的 OpenAPI；Rust 服务端独立执行权威校验，并满足：
+浏览器/运维客户端必须提供 owner session；禁止把密码或 session cookie 复制进示例或 shell history。命令 body 参照 `packages/contracts/src/admin.ts` 和生成的 OpenAPI；Rust 服务端独立执行权威校验，并满足：
 
 1. 每个 `command_id` 是新 UUIDv7；相同 command/body 可安全重放，相同 ID/不同 body 是冲突。
 2. 先注册依赖目标；禁止 self-dependency。
@@ -195,14 +189,15 @@ cargo run --locked -p status-release -- --config release.status.json --verify-on
 
 # 受审批 runner：秘密只存在环境中。
 export MOE_RELEASE_API_URL='https://status.moesegfault.dev'
-export MOE_MACHINE_JWT='<short-lived token>'
+# MACHINE_JWT_PRIVATE_KEY 由受保护 runner 环境注入；Rust CLI 内存签发。
+# Inject MACHINE_JWT_PRIVATE_KEY through the protected runner environment; Rust signs in memory.
 export CLOUDFLARE_API_TOKEN='<least-privilege token>'
 cargo run --locked -p status-release -- --config release.status.json
 ```
 
-脚本顺序固定为：SHA-256 exact bytes → 注册 immutable manifest → 为每个 artifact 建立受限上传 session → PUT → HEAD/metadata/digest commit → 幂等重读必须为 `ready` → `wrangler deploy --no-bundle --upload-source-maps --strict`。受 `If-None-Match: *` 保护的 PUT 返回 412 表示相同内容寻址 key 已存在，客户端继续 commit，由服务端 HEAD/digest 做权威验证，绝不覆盖。最后一步显式传入同一 `DEPLOYMENT_ID`、`GIT_COMMIT`、`ARTIFACT_DIGEST`、`STATUS_VERSION` 与 `ENVIRONMENT`，使 runtime telemetry 与注册表同源。任何失败都会阻止 Wrangler；不得以 `--no-bundle` 外的二次构建替换已登记字节。Cloudflare 也明确把 `--dry-run --outdir` 定位为上线前取得 bundle/source map 的阶段。[Wrangler deploy commands](https://developers.cloudflare.com/workers/wrangler/commands/workers/)
+脚本顺序固定为：SHA-256 exact bytes → 注册 immutable manifest → 为每个 artifact 建立受限上传 session → PUT → HEAD/metadata/digest commit → 幂等重读必须为 `ready` → `wrangler versions upload` → 审核版本 ID → `wrangler versions deploy`。受 `If-None-Match: *` 保护的 PUT 返回 412 表示相同内容寻址 key 已存在，客户端继续 commit，由服务端 HEAD/digest 做权威验证，绝不覆盖。最后一步显式传入同一 `DEPLOYMENT_ID`、`GIT_COMMIT`、`ARTIFACT_DIGEST`、`STATUS_VERSION` 与 `ENVIRONMENT`，使 runtime telemetry 与注册表同源。任何失败都会阻止 Wrangler；不得以 `--no-bundle` 外的二次构建替换已登记字节。Cloudflare 也明确把 `--dry-run --outdir` 定位为上线前取得 bundle/source map 的阶段。[Wrangler deploy commands](https://developers.cloudflare.com/workers/wrangler/commands/workers/)
 
-`ready` **不代表已经部署，也绝不自动改动探针使用的 current deployment 指针**。Wrangler 成功且 smoke/canary 证据通过后，由 Access `admin` 主体执行显式 cut-over：
+`ready` **不代表已经部署，也绝不自动改动探针使用的 current deployment 指针**。Wrangler 成功且 smoke/canary 证据通过后，由登录后的单一 owner执行显式 cut-over：
 
 ```bash
 curl --fail-with-body \
@@ -220,9 +215,11 @@ curl --fail-with-body \
 
 `expected_deployment_revision` 必须来自 artifact commit 后的 `ready` 响应；`expected_pointer_revision` 首次激活为 `null`，后续使用上次激活响应的 `pointer_revision`。服务端在一个 D1 batch 内再次断言 deployment 仍为该 `ready` revision、切换 `(service_name, environment)` 指针、把新部署追加为 `active`，并在完整 cut-over 时把旧指针指向的 `active` deployment 追加为 `retired`，最后写 audit/outbox/幂等账本。任一 revision 已变化则整批回滚。滚动流量重叠期不要提前执行此命令；它表达的是权威探针来源已完成切换。
 
-GitHub CI 的发布 machine JWT 没有、也不应取得该 Access admin 能力。自动化若未来确有激活需求，必须另行设计可审计的机器主体、独立 audience/scope 与审批门，而不是复用 `deployments:write artifacts:write`。
+GitHub CI 的发布 machine JWT 没有、也不应取得该 owner 管理能力。自动化若未来确有激活需求，必须另行设计可审计的机器主体、独立 audience/scope 与审批门，而不是复用 `deployments:write artifacts:write`。
 
-GitHub Pages 仅由 `workflow_dispatch` 触发，并经过 `github-pages` Environment；它不会随 main push 自动上线。为该 Environment 设置 required reviewers，并保护 custom domain。
+Ops 前端与 Rust gateway 使用同一个 Worker 的静态资源（Static Assets）部署：平台提供 UI，`/api/*` 先进入 Rust；撤下旧 GitHub Pages 发布链。前后端作为同一版本发布，不能让 SPA fallback 吞掉 API 的认证或错误响应。 / Ops UI and Rust gateway share one Static Assets deployment: the platform serves UI while `/api/*` enters Rust first. Retire the GitHub Pages pipeline and prevent SPA fallback from swallowing API responses. [Static Assets routing](https://developers.cloudflare.com/workers/static-assets/routing/worker-script/)
+
+GitHub 仅执行受控 `wrangler versions upload` 和 `wrangler versions deploy`，不改 DNS/Access。Custom Domain 与 Cron/路由触发器由本机 CLI `wrangler triggers deploy` 管理；Custom Domain 由 Cloudflare 自动创建 DNS 和证书，不在 GitHub 另写 DNS 记录。版本上传本身不代表触发器已更新。 / GitHub uploads/deploys versions only. Local CLI manages domains/triggers; Cloudflare creates Custom Domain DNS and certificates. Version upload does not update triggers. [Versions](https://developers.cloudflare.com/workers/versions-and-deployments/), [Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/), [Wrangler commands](https://developers.cloudflare.com/workers/wrangler/commands/workers/)
 
 ## 5. DLQ 分诊与幂等重放 / DLQ triage and idempotent replay
 
@@ -272,29 +269,29 @@ Cloudflare Workers 的 OpenTelemetry Protocol（OTLP）export 目前支持 **tra
 
 首要原则：`unknown` 不是 `operational`；控制面失败不得污染公共数据面；不能验证安全条件时 fail closed。
 
-| 故障 / Failure                     | 立即动作 / Immediate action                                                   | 禁止 / Never do                            | 恢复证据 / Recovery evidence                      |
-| ---------------------------------- | ----------------------------------------------------------------------------- | ------------------------------------------ | ------------------------------------------------- |
-| D1 unavailable                     | 冻结 mutation/deploy；保留缓存公共读；外部渠道声明状态数据可能过期            | 不把写入改成本地内存“成功”                 | health、读写 canary、Queue lag 回落、约束检查     |
-| Queue publish/consumer unavailable | producer 有界退避；告警 backlog；暂停会制造更多诊断的批任务                   | 不丢事件后伪造绿色状态                     | enqueue/ack canary，重复事件无副作用              |
-| R2 unavailable                     | 阻断 artifact commit 与新生产流量；已有 status read 可继续                    | 不把 deployment 强行标 ready               | PUT/HEAD checksum canary，manifest replay ready   |
-| Access unavailable                 | 公共 status 保持；所有管理 mutation fail closed；使用预先审批的外部通信渠道   | 不临时公开 admin endpoint、不直改 D1       | Access assertion 验签、viewer/operator RBAC tests |
-| Machine issuer/JWKS unavailable    | 停止发布和新机器会话；保留已验证请求的正常过期语义                            | 不延长 15 分钟上限、不关闭 issuer/aud 校验 | 新 key/旧 key 轮换窗口测试，claim mismatch 仍 403 |
-| OTLP backend unavailable           | 使用 Workers Logs/dashboard；标记 observability degraded；保留 Correlation ID | 不因“没有 error trace”判健康               | destination status、已知 canary trace/log 可检索  |
-| Analytics Engine unavailable       | 降级派生分析，D1 领域判断继续                                                 | 不从 AE 回写权威 status                    | 写入/查询 canary 与延迟恢复                       |
-| Scheduler/probe region failure     | freshness 到期后显示 unknown；比对多地点与 dependency graph                   | 不用单一失败地点直接扩大 outage            | 多地点样本、policy revision、freshness 恢复       |
+| 故障 / Failure                     | 立即动作 / Immediate action                                                         | 禁止 / Never do                                                    | 恢复证据 / Recovery evidence                                               |
+| ---------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------ | -------------------------------------------------------------------------- |
+| D1 unavailable                     | 冻结 mutation/deploy；保留缓存公共读；外部渠道声明状态数据可能过期                  | 不把写入改成本地内存“成功”                                         | health、读写 canary、Queue lag 回落、约束检查                              |
+| Queue publish/consumer unavailable | producer 有界退避；告警 backlog；暂停会制造更多诊断的批任务                         | 不丢事件后伪造绿色状态                                             | enqueue/ack canary，重复事件无副作用                                       |
+| R2 unavailable                     | 阻断 artifact commit 与新生产流量；已有 status read 可继续                          | 不把 deployment 强行标 ready                                       | PUT/HEAD checksum canary，manifest replay ready                            |
+| Owner authentication unavailable   | 公共 status 保持；管理失败关闭 / Public status remains, administration fails closed | 不临时公开管理入口或直改 D1 / No public bypass or ad-hoc D1 writes | 登录、会话、CSRF 与全局预算恢复 / Login, session, CSRF and budget recovery |
+| Machine issuer/JWKS unavailable    | 停止发布和新机器会话；保留已验证请求的正常过期语义                                  | 不延长 15 分钟上限、不关闭 issuer/aud 校验                         | 新 key/旧 key 轮换窗口测试，claim mismatch 仍 403                          |
+| OTLP backend unavailable           | 使用 Workers Logs/dashboard；标记 observability degraded；保留 Correlation ID       | 不因“没有 error trace”判健康                                       | destination status、已知 canary trace/log 可检索                           |
+| Analytics Engine unavailable       | 降级派生分析，D1 领域判断继续                                                       | 不从 AE 回写权威 status                                            | 写入/查询 canary 与延迟恢复                                                |
+| Scheduler/probe region failure     | freshness 到期后显示 unknown；比对多地点与 dependency graph                         | 不用单一失败地点直接扩大 outage                                    | 多地点样本、policy revision、freshness 恢复                                |
 
-每次事件保留：UTC 时间线、deployment ID、git commit、Correlation/trace ID、受影响 binding、失败阶段、采取的幂等命令、恢复验证与后续 action。严禁粘贴 authorization header、Access assertion、presigned URL 或 R2 credential。
+每次事件保留：UTC 时间线、deployment ID、git commit、Correlation/trace ID、受影响 binding、失败阶段、采取的幂等命令、恢复验证与后续 action。严禁粘贴 authorization header、密码/session cookie、presigned URL 或 R2 credential。
 
 ## 9. 发布前最终门禁 / Final go-live gate
 
 - [ ] CI 所有 job 通过；OpenAPI 生成无 diff、lint 与 breaking gate 通过。
-- [ ] staging 完整演练：migration、bootstrap、machine JWT、artifact upload/ready、Worker deploy、Pages 手工 deploy。
-- [ ] Access audience/issuer/sub-role 映射与三种角色负向测试通过。
+- [ ] staging 完整演练：migration、bootstrap、machine JWT、artifact upload/ready、Worker 版本发布、同版本 Ops Static Assets 与本机触发器配置。
+- [ ] owner 登录/退出、错误密码、全局预算、CSRF、会话过期与密码轮换后旧会话拒绝测试通过。
 - [ ] D1/Queue/DLQ/R2/AE/Service Binding 均为 production 独立资源，DLQ 告警已触发测试。
 - [ ] source map 能把生产 canary stack 定位到同一 git commit；R2 digest/metadata 一致。
 - [ ] retention migration、cleanup、D1 restore、DLQ canary replay 已演练并有证据。
 - [ ] OTLP trace/log destination 可检索；metrics 缺口有明确替代；external telemetry outage 不会显示绿色。
-- [ ] GitHub `github-pages` 与 production release Environment 都有 required reviewers；secret scanning/branch protection 已启用。
+- [ ] 受控 production release 有 required reviewers；GitHub 无 DNS/Access 权限、无管理员密码；secret scanning/branch protection 已启用。
 
 任一项未完成：保持 workflow 手动、不得接 production 流量。可爱归可爱，生产事故可一点也不萌喵。
 
