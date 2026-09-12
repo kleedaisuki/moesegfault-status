@@ -2,9 +2,14 @@
 
 Rust 实现的 Cloudflare Workers 运维后端，TypeScript 实现的运维前端。 / A Rust Cloudflare Workers operations backend with a TypeScript operations frontend.
 
-**Rust status bootstrap、Ops 静态 UI、两个自定义域名和管理员 Worker secret 已在云端部署并核验；业务 API 仍以 503 保持引导/来源门禁，尚未完成正式 ready 发布或云端登录验收。** / **Rust status bootstrap, Ops UI, both custom domains and the administrator secret are deployed and checked. Business APIs still return 503 under bootstrap/provenance gates; full readiness-gated release and cloud login remain outstanding.**
+**截至 2026-09-12，三个 Rust Worker 已通过 GitHub Actions 发布并激活，真实浏览器登录、跨域读取及注销已验证；尚未登记外部监控目标或启用通知。** / **As verified on 2026-09-12, all three Rust Workers were released through GitHub Actions and activated; real browser login, cross-origin reads and logout passed. External monitor targets and notifications remain unconfigured.**
 
 统一验收命令与边界见 [Rust 验收记录](docs/rust-acceptance.md)。 / See the [Rust acceptance record](docs/rust-acceptance.md) for consolidated checks and limitations.
+
+## 接入与交接 / Integration and handoff
+
+- [调用者接入指南 / Caller integration guide](docs/integration-guide.md)：入口、认证、调用与重试。 / Endpoints, authentication, calls and retries.
+- [项目上下文交接 / Project context handoff](docs/project-handoff.md)：架构、代码导航、已验证状态和维护边界。 / Architecture, source navigation, verified state and maintenance boundaries.
 
 ## 结构 / Structure
 
@@ -68,10 +73,10 @@ GNU General Public License version 3；参见 / see [LICENSE](LICENSE).
 
 ## 单管理员与部署职责 / Single owner and deployment duties
 
-管理员仅一人：预配置密码登录/退出，无注册、setup 或改密 UI，无 Cloudflare Access。`ADMIN_PASSWORD_RECORD` 仅作为 Worker secret；随机密码留在受 OS ACL 保护的本机文件，不进入代码、GitHub 或聊天。本机已上传该 Worker secret 并核验新版本 100% 部署；尚未证明云端登录成功。 / One owner has password login/logout only, without registration, setup, password-change UI or Access. Keep the password local under OS ACLs and the derived record in a Worker secret; secret installation and full version cutover are verified, but successful cloud login is not.
+管理员仅一人：预配置随机口令登录/退出，无注册、setup 或改密 UI，无 Cloudflare Access。派生记录只存 Worker Secret `ADMIN_PASSWORD_RECORD`；本地凭据位于被 Git 忽略的 `.local/credentials/`，不进入代码、GitHub 或聊天。 / One owner uses a pre-generated random credential without registration, setup, password-change UI or Access. The verifier lives in a Worker Secret; local credentials remain in ignored `.local/credentials/`, never source control, GitHub or chat.
 
 Ops UI 使用同一个 Rust gateway Worker 的 Static Assets，`/api/*` 进入 Rust。GitHub 只发布 Worker 版本；本机 CLI 管理 Custom Domain/触发器，Cloudflare 自动配置对应 DNS 与证书。全部 9 个 D1 迁移已在远端应用且完整性检查通过；`0009` 保存会话摘要与登录预算，不保存密码。 / Ops assets share the Rust gateway Worker, with API paths entering Rust. GitHub publishes versions; local CLI manages domains/triggers. All nine remote migrations and integrity checks passed; migration 0009 stores sessions and login budgets, not passwords.
 
-上传通过机器 JWT 认证的 Rust Worker PUT 使用原生 R2 binding，无需 S3 凭据；完整 commit/ready 门禁保留。通知默认关闭、外部 outbox 保持 pending；外部遥测凭据可选。当前正推进三个内部平台服务的真实 Actions 发布，不创建虚假 monitor、component 或健康观测；最终上线状态以验收记录为准。 / Authenticated Rust Worker PUT uses native R2 without S3 credentials and retains commit/readiness. Notifications default off with pending outbox; telemetry credentials are optional. Actual Actions releases are in progress without fabricated monitoring data; see the acceptance record for final status.
+上传通过机器 JWT 认证的 Rust Worker PUT 使用原生 R2 binding，无需 S3 凭据；完整 commit/ready 门禁保留。通知默认关闭，外部待发事件保留；外部遥测凭据可选。平台发布不代表外部服务健康，实际证据见 [部署记录](docs/deployment-status.md)。 / Authenticated Rust Worker PUT uses native R2 without S3 credentials and retains commit/readiness. Notifications remain disabled with pending events retained; external telemetry credentials are optional. Platform publication is not evidence of external service health; see the deployment record.
 
-**应用部署（包括 bootstrap）只走 GitHub Actions；本机不再上传应用代码。** 本机仅管理 DNS/Secrets/平台资源并测试。早期本机上传事实不代表当前流程。三个真实内部服务身份已原子初始化（无 monitor/component/健康观测）；三个 production 构建及本机 46 MiB 上传→commit→ready 专项验证已通过，正式发布仍须 Actions 实际结果。 / **GitHub Actions exclusively deploys application code, including bootstrap.** Local work is provisioning/configuration/testing only. Platform identities and focused build/upload checks are complete, not production release.
+**应用部署（包括 bootstrap）只走 GitHub Actions；本机不上传应用代码。** 本机仅管理 DNS、Secrets、平台资源并测试。不要将历史 bootstrap 记录或配置文件当作当前运行状态。 / **GitHub Actions exclusively deploys application code, including bootstrap.** Local operations manage DNS, Secrets and platform resources and run tests. Historical bootstrap entries and configuration files do not prove current runtime state.
