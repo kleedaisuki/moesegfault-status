@@ -303,6 +303,8 @@ export const EvaluationPolicySchema = z.strictObject({
     .min(1)
     .max(7),
   failure_status: z.enum(["degraded", "partial_outage", "major_outage"]),
+  /** active Issue 解决所需的连续恢复证据数。 / Consecutive recovery evidence required to resolve an active Issue. */
+  recovery_min_occurrences: z.number().int().min(2).max(100_000).optional(),
 });
 export type EvaluationPolicy = z.infer<typeof EvaluationPolicySchema>;
 
@@ -563,6 +565,19 @@ export const UpdateMonitorCommandSchema = z
   });
 export type UpdateMonitorCommand = z.infer<typeof UpdateMonitorCommandSchema>;
 
+/** 受审核的后端查询实现；注册值不能选择任意代码 / Reviewed backend query implementations; registry values cannot select arbitrary code. */
+export const TelemetryBackendQueryAdapterSchema = z.enum([
+  "tempo",
+  "loki",
+  "pyroscope",
+  "prometheus",
+  "source-commit",
+  "artifact-registry",
+]);
+export type TelemetryBackendQueryAdapter = z.infer<
+  typeof TelemetryBackendQueryAdapterSchema
+>;
+
 /** 遥测后端注册项；auth_reference 仅为 secret 引用 / Telemetry backend registration; auth_reference is a secret reference, never a credential. */
 export const TelemetryBackendRegistrationSchema = z.strictObject({
   name: z
@@ -583,7 +598,7 @@ export const TelemetryBackendRegistrationSchema = z.strictObject({
     )
     .min(1)
     .max(6),
-  query_adapter: z.string().min(1).max(128),
+  query_adapter: TelemetryBackendQueryAdapterSchema,
   ui_url_template: z.string().url().max(2048),
   retention_class: z.string().min(1).max(64),
   auth_reference: z
@@ -969,6 +984,11 @@ export type SetStatusOverrideRpcResult = z.infer<
 
 /** RPC 名称联合，用于穷尽调度 / RPC name union for exhaustive dispatch. */
 export const AdminRpcNameSchema = z.enum([
+  "registerAndAssignRetentionPolicy",
+  "activateDeployment",
+  "updateServiceCatalog",
+  "createComponent",
+  "updateComponentCatalog",
   "checkHealth",
   "getIncident",
   "searchIssues",
@@ -979,6 +999,11 @@ export const AdminRpcNameSchema = z.enum([
   "createMaintenanceWindow",
   "updateMaintenanceWindow",
   "queryDiagnosticContext",
+  "queryTelemetryReference",
+  "getServiceCatalog",
+  "getComponentCatalog",
+  "getServiceRetentionPolicyAssignment",
+  "getDeploymentActivationContext",
   "registerService",
   "createMonitor",
   "updateMonitor",
