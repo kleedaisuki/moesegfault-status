@@ -172,5 +172,12 @@ fn headers(correlation: &str, media_type: &str, cache: &str) -> worker::Result<H
     headers.set("cache-control", cache)?;
     headers.set("x-content-type-options", "nosniff")?;
     headers.set("x-moesegfault-correlation-id", correlation)?;
+    // 运维浏览器跨域读取公开投影；不允许凭据、不反射 Origin，也不作用于机器写接口。
+    // The operations browser reads public projections cross-origin; no credentials, origin reflection or machine-write CORS.
+    headers.set("access-control-allow-origin", "https://ops.moesegfault.dev")?;
+    headers.set(
+        "access-control-expose-headers",
+        "x-moesegfault-correlation-id, etag",
+    )?;
     Ok(headers)
 }

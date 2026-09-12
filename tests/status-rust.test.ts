@@ -111,9 +111,19 @@ it("executes public Rust reads and refuses forged public correlation identities"
     "/v1/maintenance-windows",
   ]) {
     const response = await runtime.dispatchFetch(`https://status.test${path}`, {
-      headers: { "x-moesegfault-correlation-id": forged },
+      headers: {
+        "x-moesegfault-correlation-id": forged,
+        Origin: "https://ops.moesegfault.dev",
+      },
     });
     expect(response.status, path).toBe(200);
+    expect(response.headers.get("access-control-allow-origin")).toBe(
+      "https://ops.moesegfault.dev",
+    );
+    expect(response.headers.get("access-control-allow-credentials")).toBeNull();
+    expect(response.headers.get("access-control-expose-headers")).toContain(
+      "x-moesegfault-correlation-id",
+    );
     expect(response.headers.get("x-moesegfault-correlation-id")).not.toBe(
       forged,
     );
@@ -134,6 +144,7 @@ it("has no public administrator, generic RPC, or test route", async () => {
   ]) {
     const response = await runtime.dispatchFetch(`https://status.test${path}`);
     expect(response.status, path).toBe(404);
+    expect(response.headers.get("access-control-allow-origin")).toBeNull();
     expect(response.headers.get("cache-control")).toBe("no-store");
   }
 });
@@ -165,6 +176,7 @@ it("deployment rejection carries one correlation identity across body and header
     },
   );
   expect(response.status).toBeGreaterThanOrEqual(400);
+  expect(response.headers.get("access-control-allow-origin")).toBeNull();
   const body = (await response.json()) as { correlation_id: string };
   expect(body.correlation_id).toBe(correlation);
   expect(response.headers.get("x-moesegfault-correlation-id")).toBe(
