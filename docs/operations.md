@@ -27,7 +27,7 @@
 | GitHub CI / release                 | 测试及受控 Worker 版本上传、部署 / Tests and controlled Worker version upload/deployment                   | 不授予 DNS 或 Access 管理权限；不接收管理员密码 / No DNS/Access administration or administrator password          |
 | 单一 owner / Sole owner             | 预配置密码登录与退出，执行管理操作 / Preconfigured password login/logout and administration                | 无公开注册、setup 或改密 UI / No registration, setup or password-change UI                                        |
 | Rust ops-gateway                    | 验证 D1 会话和 Origin/CSRF，调用私有 AdminRpc / Validate sessions and Origin/CSRF, invoke private AdminRpc | 不信任身份请求头，不公开通用 RPC 隧道 / No trusted identity headers or generic RPC tunnel                         |
-| 本机运维 CLI / Local operations CLI | 配置 Worker secret、Custom Domain 与触发器 / Configure secrets, domains and triggers                       | 不把本机管理员密码复制到仓库、GitHub 或聊天 / Never copy the local password into source, GitHub or chat           |
+| 本机运维 CLI / Local operations CLI | 配置 Worker secret、Custom Domain 与触发器 / Configure secrets, domains and triggers                       | 不把本机管理员密码提交到 Git、GitHub 或聊天 / Never copy the local password into source, GitHub or chat           |
 | status Worker                       | D1、Queue/DLQ、私有 R2 与所需 secret / Domain state, queues, private artifacts and required secrets        | 不向前端返回 object key、凭据或原始遥测 / No credentials, private locators or raw telemetry in frontend responses |
 
 ### 1.1 单管理员密码 / Single-administrator password
@@ -42,7 +42,7 @@
 
 运维 UI 使用官方 `moesegfault-style v0.1.2` 静态分发，固定来源提交与 SHA-256，详情见 `apps/ops/vendor/README.md`。 / The operations UI consumes the official pinned `moesegfault-style v0.1.2` static release; see `apps/ops/vendor/README.md` for source and integrity details.
 
-不使用 Cloudflare Access。管理员只有一个 owner，密码事先生成并保存在受操作系统访问控制列表（Access Control List, ACL）保护的本机私密文件中；仓库不记录该文件路径、密码或密码记录。前端只提供登录和退出，没有 setup、注册、账号管理或修改密码入口。 / Cloudflare Access is not used. A single owner uses a pre-generated password retained in an OS-ACL-protected local private file. Neither its path nor the password/record belongs in source. The UI provides login/logout only.
+不使用 Cloudflare Access。管理员只有一个 owner，密码事先生成并保存在受操作系统访问控制列表（Access Control List, ACL）保护的本机私密文件中；默认文件位于仓库 `.local/credentials/administrator-login.txt`，由 Git 忽略且保留仅本人/SYSTEM 的 ACL；密码与密码记录不得提交。前端只提供登录和退出，没有 setup、注册、账号管理或修改密码入口。 / Cloudflare Access is not used. A single owner uses a pre-generated password retained in an OS-ACL-protected local private file. The default file is repository-local `.local/credentials/administrator-login.txt`, Git-ignored and restricted to the current user/SYSTEM; never commit the password or verifier. The UI provides login/logout only.
 
 - `ADMIN_PASSWORD_RECORD` 是 Worker secret：PBKDF2-SHA256（Password-Based Key Derivation Function 2），100,000 次迭代、16 字节随机盐、32 字节派生哈希。密码明文不进入 D1、GitHub、构建产物或日志。 / The Worker secret stores a PBKDF2-SHA256 record with 100,000 iterations, a 16-byte random salt and a 32-byte derived hash. Plaintext never enters D1, GitHub, build artifacts or logs.
 
@@ -86,7 +86,7 @@
 
 ### 2.1 Secret 清单
 
-通过交互式 stdin、受保护 CI 或本机 secret bulk 注入。禁止把生产 secret 放入仓库内 `.dev.vars`、仓库/可发布 JSON、命令行参数、issue、构建 artifact 或前端 bundle；受 OS ACL 保护、位于仓库外且不上传 GitHub 的私密 JSON bulk 文件允许作为本机预置材料。 / Inject through stdin, protected CI or local secret bulk input. Production secrets must not enter repository/publishable files, CLI arguments, issues, build artifacts or frontend bundles. An OS-ACL-protected secret bulk JSON file outside the repository and never uploaded to GitHub is permitted for local provisioning.
+通过交互式 stdin、受保护 CI 或本机 secret bulk 注入。禁止把生产 secret 放入仓库内 `.dev.vars`、仓库/可发布 JSON、命令行参数、issue、构建 artifact 或前端 bundle；受 OS ACL 保护且不上传 GitHub 的私密 JSON bulk 文件允许作为本机预置材料；默认目录为 Git 忽略的 `.local/credentials/`，也可显式指定仓库外私密目录。 / Inject through stdin, protected CI or local secret bulk input. Production secrets must not enter repository/publishable files, CLI arguments, issues, build artifacts or frontend bundles. An OS-ACL-protected secret bulk JSON file never uploaded to GitHub is permitted for local provisioning: default to Git-ignored `.local/credentials/`, or explicitly select an external private directory.
 
 ```bash
 pnpm exec wrangler secret put ADMIN_PASSWORD_RECORD --config wrangler.jsonc

@@ -28,7 +28,6 @@ import {
   isAbsolute,
   sep,
 } from "node:path";
-import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 
 /** 固定仓库与 CLI，禁止通过参数重定向部署。 / Fixed repository and deployment CLI. */
@@ -41,7 +40,19 @@ const passwordBytes = 24;
 const passwordName = "administrator-login.txt";
 const secretName = "status-worker-secrets.json";
 
-/** 检查真实祖先，阻止链接将凭据引入仓库。 / Resolve existing ancestors to reject repository aliases. */
+/** 判断目录包含关系，不将同名前缀误认为子目录。 / Compare directory boundaries, not name prefixes. */
+function contains(parent, child) {
+  const delta = relative(parent, child);
+  return (
+    !delta ||
+    (delta !== ".." && !delta.startsWith(`..${sep}`) && !isAbsolute(delta))
+  );
+}
+
+/** 默认凭据仅在 Git 忽略的本机目录保存。 / Default credentials live only in the Git-ignored local directory. */
+export const defaultDirectory = join(repository, ".local", "credentials");
+
+/** 检查真实祖先及 Git 状态，拒绝仓库路径别名和链接逃逸。 / Check canonical ancestors and Git state; reject repository aliases and escapes. */
 export function privateDirectory(input) {
   const path = resolve(input);
   let ancestor = path;
@@ -51,12 +62,32 @@ export function privateDirectory(input) {
     ancestor = dirname(ancestor);
   }
   const canonical = resolve(realpathSync(ancestor), ...missing);
-  const delta = relative(repository, canonical);
+  if (!contains(repository, path) && !contains(repository, canonical))
+    return canonical;
   if (
-    !delta ||
-    (delta !== ".." && !delta.startsWith(`..${sep}`) && !isAbsolute(delta))
+    !contains(defaultDirectory, path) ||
+    !contains(defaultDirectory, canonical) ||
+    relative(path, canonical)
   )
-    throw new Error("Private directory must be outside the repository.");
+    throw new Error(
+      "Repository credentials require the canonical .local/credentials directory.",
+    );
+  try {
+    const tracked = run("git", ["ls-files", "-z", "--", ".local/credentials"]);
+    if (tracked) throw new Error("Tracked credential files.");
+    // Verify the directory rule itself, including before the directory exists. / 创建前也验证目录本身被忽略。
+    run("git", [
+      "check-ignore",
+      "--quiet",
+      "--no-index",
+      "--",
+      relative(repository, canonical).split(sep).join("/") + "/",
+    ]);
+  } catch {
+    throw new Error(
+      "Repository credentials must be Git-ignored and contain no tracked files.",
+    );
+  }
   return canonical;
 }
 
@@ -233,13 +264,7 @@ export function main(args) {
     throw new Error(
       "Usage: admin-secret.mjs create|upload [--directory PRIVATE_DIR]",
     );
-  const directory =
-    args[2] ??
-    join(
-      process.env.LOCALAPPDATA ?? join(homedir(), ".local", "share"),
-      "moesegfault-status",
-      "credentials",
-    );
+  const directory = args[2] ?? defaultDirectory;
   const path =
     args[0] === "create"
       ? createCredentials(directory)

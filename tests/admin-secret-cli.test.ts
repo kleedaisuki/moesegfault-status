@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   mkdtempSync,
+  mkdirSync,
+  copyFileSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -8,6 +10,7 @@ import {
   statSync,
   symlinkSync,
 } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { pbkdf2Sync } from "node:crypto";
@@ -83,8 +86,8 @@ describe("local administrator provisioning", () => {
   });
 
   it("rejects repository paths including dot-dot-prefixed child names and aliases", () => {
-    expect(() => privateDirectory(resolve(".private"))).toThrow("outside");
-    expect(() => privateDirectory(resolve("..private"))).toThrow("outside");
+    expect(() => privateDirectory(resolve(".private"))).toThrow("canonical");
+    expect(() => privateDirectory(resolve("..private"))).toThrow("canonical");
     const alias = join(directory(), "alias");
     symlinkSync(
       resolve("."),
@@ -92,8 +95,50 @@ describe("local administrator provisioning", () => {
       process.platform === "win32" ? "junction" : "dir",
     );
     expect(() => privateDirectory(join(alias, "credentials"))).toThrow(
-      "outside",
+      "canonical",
     );
+  });
+
+  it("accepts only ignored untracked canonical repository credentials", async () => {
+    const repo = directory();
+    const script = join(repo, "scripts/operations/admin-secret.mjs");
+    mkdirSync(join(repo, "scripts/operations"), { recursive: true });
+    copyFileSync(resolve("scripts/operations/admin-secret.mjs"), script);
+    const git = (...args: string[]) =>
+      execFileSync("git", args, {
+        cwd: repo,
+        stdio: "pipe",
+        windowsHide: true,
+      });
+    git("init", "--quiet");
+    const local = join(repo, ".local/credentials");
+    const cli = await import(pathToFileURL(script).href);
+    expect(cli.defaultDirectory).toBe(local);
+    expect(() => cli.privateDirectory(local)).toThrow("Git-ignored");
+    writeFileSync(join(repo, ".gitignore"), "/.local/credentials/\n");
+    expect(cli.privateDirectory(local)).toBe(local);
+    expect(cli.privateDirectory(join(local, "rotation"))).toBe(
+      join(local, "rotation"),
+    );
+    mkdirSync(local, { recursive: true });
+    writeFileSync(join(local, "dummy.txt"), "not a credential");
+    git("add", "--force", ".local/credentials/dummy.txt");
+    expect(() => cli.privateDirectory(local)).toThrow("tracked");
+    git("rm", "--cached", ".local/credentials/dummy.txt");
+    const external = directory();
+    const kind = process.platform === "win32" ? "junction" : "dir";
+    symlinkSync(external, join(local, "escape"), kind);
+    expect(() => cli.privateDirectory(join(local, "escape"))).toThrow(
+      "canonical",
+    );
+    const alias = join(directory(), "alias");
+    symlinkSync(local, alias, kind);
+    expect(() => cli.privateDirectory(alias)).toThrow("canonical");
+    symlinkSync(local, join(local, "alias"), kind);
+    expect(() => cli.privateDirectory(join(local, "alias"))).toThrow(
+      "canonical",
+    );
+    expect(cli.privateDirectory(external)).toBe(external);
   });
 
   it("uploads only the verifier after successful existing-Worker metadata inspection", () => {
