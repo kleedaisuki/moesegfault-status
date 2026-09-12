@@ -175,6 +175,12 @@ importers:
       '@types/node':
         specifier: ^24.0.0
         version: 24.13.4
+      esbuild:
+        specifier: 0.28.2
+        version: 0.28.2
+      miniflare:
+        specifier: 5.20260911.0-alpha
+        version: 5.20260911.0-alpha(@types/node@24.13.4)
       prettier:
         specifier: ^3.6.0
         version: 3.9.6
