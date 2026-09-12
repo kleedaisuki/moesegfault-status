@@ -1,5 +1,5 @@
 //! 不可变 Rust Worker 发布事务。 / Immutable Rust Worker release transaction.
-//! 注册、受限上传和 ready 门禁先于部署；激活保留 Access admin 审批。
+//! 注册、受限上传和 ready 门禁先于部署；激活保留管理员审批。
 //! Registration, scoped uploads and readiness precede deployment; activation remains administrator-approved.
 
 use anyhow::{Context, Result, bail, ensure};
@@ -193,9 +193,15 @@ pub fn prepare(config: &ReleaseConfig, base: &Path) -> Result<Vec<PreparedArtifa
             "artifact filenames must be unique across kinds"
         );
         ensure!(
-            fs::metadata(&path)?.len() <= 128 * 1024 * 1024,
-            "artifact exceeds 128 MiB client limit"
+            fs::metadata(&path)?.len() <= 64 * 1024 * 1024,
+            "artifact exceeds 64 MiB client limit"
         );
+        if input.kind == ArtifactKind::SourceMap {
+            ensure!(
+                fs::metadata(&path)?.len() <= 8 * 1024 * 1024,
+                "source map exceeds 8 MiB client limit"
+            );
+        }
         let bytes = fs::read(&path)?;
         if let Some(asset_path) = &input.asset_path {
             asset_record(asset_path, &input.media_type, &bytes)?;
@@ -553,6 +559,34 @@ fn secure_url(value: &str) -> Result<Url> {
     );
     Ok(url)
 }
+/// 仅允许精确的同源上传能力路径，绝不把 bearer 发给注册表指定的其他目标。
+/// Accept only the exact same-origin upload capability path; never forward bearer to another target.
+fn native_upload_url(base: &Url, value: &str, deployment: &str, upload: &str) -> Result<Url> {
+    ensure!(
+        [deployment, upload]
+            .iter()
+            .all(|id| !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')),
+        "invalid upload capability identifier"
+    );
+    let url = secure_url(value)?;
+    let mut expected = base.clone();
+    expected.set_path("/");
+    expected.set_query(None);
+    expected.set_fragment(None);
+    expected
+        .path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("invalid registry origin"))?
+        .clear()
+        .extend(["v1", "deployments", deployment, "artifact-uploads", upload]);
+    ensure!(
+        url.origin() == base.origin()
+            && url.query().is_none()
+            && url.path() == expected.path()
+            && value == expected.as_str(),
+        "upload URL must be the exact same-origin capability endpoint"
+    );
+    Ok(url)
+}
 /// 预检未验签 claims；服务端仍必须验签。 / Preflight unsigned claims; the server must still verify the signature.
 fn validate_token(token: &str, config: &ReleaseConfig) -> Result<()> {
     let parts: Vec<_> = token.split('.').collect();
@@ -681,7 +715,7 @@ fn mint_machine_token(
     validate_token(&token, config)?;
     Ok(token)
 }
-/// 注册客户端，不导出或记录 bearer 与预签名 URL。 / Registry client; never exports or logs bearer or presigned URLs.
+/// 注册客户端，不导出或记录 bearer 与上传 URL。 / Registry client; never exports or logs bearer or upload URLs.
 struct Registry {
     /// 不重定向的 HTTP 客户端。 / Non-redirecting HTTP client.
     client: Client,
@@ -782,10 +816,14 @@ impl Registry {
             &upload_body,
             Some(&key),
         )?;
-        let url = secure_url(
+        let upload_id = session["upload_id"].as_str().context("upload_id missing")?;
+        let url = native_upload_url(
+            &self.base,
             session["upload_url"]
                 .as_str()
                 .context("upload URL missing")?,
+            deployment,
+            upload_id,
         )?;
         let expires = DateTime::parse_from_rfc3339(
             session["expires_at"]
@@ -803,8 +841,13 @@ impl Registry {
         let mut actual = reqwest::header::HeaderMap::new();
         for (key, value) in headers {
             ensure!(
-                !["authorization", "cookie", "host", "proxy-authorization"]
-                    .contains(&key.to_ascii_lowercase().as_str()),
+                [
+                    "content-type",
+                    "content-length",
+                    "content-md5",
+                    "if-none-match"
+                ]
+                .contains(&key.to_ascii_lowercase().as_str()),
                 "upload session contains forbidden header"
             );
             actual.insert(
@@ -820,22 +863,6 @@ impl Registry {
             ("content-type", artifact.declaration.media_type.clone()),
             ("content-length", artifact.bytes.len().to_string()),
             ("content-md5", artifact.content_md5.clone()),
-            ("x-amz-meta-deployment-id", deployment.into()),
-            (
-                "x-amz-meta-artifact-digest",
-                artifact.declaration.artifact_digest.clone(),
-            ),
-            (
-                "x-amz-meta-artifact-kind",
-                serde_json::to_value(artifact.declaration.kind)?
-                    .as_str()
-                    .unwrap()
-                    .to_owned(),
-            ),
-            (
-                "x-amz-meta-artifact-file-name",
-                artifact.declaration.file_name.clone(),
-            ),
             ("if-none-match", "*".into()),
         ];
         for (name, value) in expected {
@@ -847,6 +874,7 @@ impl Registry {
         let response = self
             .client
             .put(url)
+            .bearer_auth(&self.token)
             .headers(actual)
             .body(artifact.bytes.clone())
             .send()
@@ -859,7 +887,7 @@ impl Registry {
             response.status().as_u16()
         );
         let mut commit = body;
-        commit["upload_id"] = json!(session["upload_id"].as_str().context("upload_id missing")?);
+        commit["upload_id"] = json!(upload_id);
         self.request(Method::POST, &format!("{path}/artifacts"), &commit, None)?;
         Ok(())
     }
@@ -1119,7 +1147,7 @@ fn wrangler(
     manifest: &Value,
     artifacts: &[PreparedArtifact],
     dry_run: bool,
-) -> Result<()> {
+) -> Result<Option<String>> {
     audit_assets(snapshot, artifacts)?;
     let mut command = Command::new("node");
     command
@@ -1188,8 +1216,9 @@ fn wrangler(
             &fs::read_to_string(&receipt).context("Wrangler upload receipt missing")?,
         )?;
         deploy_version(snapshot, &version)?;
+        return Ok(Some(version));
     }
-    Ok(())
+    Ok(None)
 }
 
 /// 只使用这次上传的结构化 receipt，不解析日志或查询可能竞争的 latest version。
@@ -1273,7 +1302,12 @@ pub fn release(
     );
     let registry = Registry::from_env(config, base)?;
     registry.register(config, manifest, artifacts)?;
-    wrangler(config, &snapshot, manifest, artifacts, false)?;
+    let version = wrangler(config, &snapshot, manifest, artifacts, false)?
+        .context("published version receipt missing")?;
+    println!(
+        "{}",
+        json!({"type":"release-completed","deployment_id":config.deployment_id,"version_id":version,"state":"ready","activation":"pending"})
+    );
     println!(
         "deployment completed after ready gate; authenticated administrator activation remains pending smoke/canary approval"
     );
@@ -1447,6 +1481,21 @@ mod tests {
             canonical(&json!({"z":1,"a":{"b":2,"a":1}})),
             r#"{"a":{"a":1,"b":2},"z":1}"#
         );
+    }
+    /// 大于传输上限的文件在读入前拒绝；常见 45.8 MiB 调试文件在限额内。
+    /// Reject oversized files before reading; a typical 45.8 MiB debug artifact is within the bound.
+    #[test]
+    fn artifact_size_limit_rejects_more_than_64_mib() {
+        let (dir, config, _) = fixture();
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(dir.path().join("worker.js"))
+            .unwrap();
+        file.set_len(64 * 1024 * 1024 + 1).unwrap();
+        let error = prepare(&config, &fs::canonicalize(dir.path()).unwrap())
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("64 MiB"));
     }
     #[test]
     fn maps_paths_and_mutation_fail_closed() {
@@ -1734,6 +1783,28 @@ if (args[1] === 'upload') fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PAT
         stream.read_exact(&mut body).unwrap();
         (headers, body)
     }
+    /// URL 能力约束覆盖编码、其他路径和凭据泄漏。 / Capability URL checks cover encoding, path substitution and credential leaks.
+    #[test]
+    fn upload_capability_url_rejects_ambiguous_or_external_targets() {
+        let base = Url::parse("https://registry.example").unwrap();
+        let good = "https://registry.example/v1/deployments/deploy-1/artifact-uploads/upload-1";
+        assert!(native_upload_url(&base, good, "deploy-1", "upload-1").is_ok());
+        for bad in [
+            good.replace("registry.example", "attacker.example"),
+            good.replace("registry.example", "registry.example:444"),
+            good.replace("https://", "https://user@"),
+            good.replace("deploy-1", "deploy-2"),
+            good.replace("upload-1", "%75pload-1"),
+            good.replace("/artifact-uploads/", "/other/../artifact-uploads/"),
+            format!("{good}?signature=x"),
+            format!("{good}#x"),
+            format!("{good}/"),
+        ] {
+            assert!(native_upload_url(&base, &bad, "deploy-1", "upload-1").is_err());
+        }
+        assert!(native_upload_url(&base, good, "..", "upload-1").is_err());
+        assert!(native_upload_url(&base, good, "deploy-1", "upload/1").is_err());
+    }
     #[test]
     fn real_https_registration_upload_commit_ready_and_412() {
         for scenario in [
@@ -1742,18 +1813,22 @@ if (args[1] === 'upload') fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PAT
             "not-ready",
             "expired",
             "checksum",
+            "cross-origin",
+            "wrong-path",
+            "header-injection",
+            "existing-commit-failed",
             "put-failed",
             "commit-failed",
             "redirect",
         ] {
             let steps = match scenario {
-                "expired" | "checksum" => 2,
+                "expired" | "checksum" | "cross-origin" | "wrong-path" | "header-injection" => 2,
                 "put-failed" | "redirect" => 3,
-                "commit-failed" => 4,
+                "commit-failed" | "existing-commit-failed" => 4,
                 _ => 5,
             };
             let upload_status = match scenario {
-                "existing" => 412,
+                "existing" | "existing-commit-failed" => 412,
                 "put-failed" => 503,
                 "redirect" => 307,
                 _ => 200,
@@ -1778,7 +1853,10 @@ if (args[1] === 'upload') fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PAT
                 "https://localhost:{}",
                 listener.local_addr().unwrap().port()
             );
-            let upload_url = format!("{base}/upload?signature=do-not-log");
+            let upload_url = format!(
+                "{base}/v1/deployments/{}/artifact-uploads/upload-1",
+                config.deployment_id
+            );
             let deployment = config.deployment_id.clone();
             let server = thread::spawn(move || {
                 for step in 0..steps {
@@ -1802,11 +1880,13 @@ if (args[1] === 'upload') fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PAT
                                 serde_json::from_slice::<Value>(&body).unwrap()["content_md5"],
                                 md5
                             );
-                            json!({"data":{"upload_id":"upload-1","upload_url":upload_url,"expires_at":(Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(),"required_headers":{"content-type":declaration["media_type"],"content-length":expected_bytes.len().to_string(),"content-md5":md5,"x-amz-meta-deployment-id":deployment,"x-amz-meta-artifact-digest":declaration["artifact_digest"],"x-amz-meta-artifact-kind":"other","x-amz-meta-artifact-file-name":"worker.js","if-none-match":"*"}}})
+                            json!({"data":{"upload_id":"upload-1","upload_url":upload_url,"expires_at":(Utc::now()+chrono::Duration::minutes(10)).to_rfc3339(),"required_headers":{"content-type":declaration["media_type"],"content-length":expected_bytes.len().to_string(),"content-md5":md5,"if-none-match":"*"}}})
                         }
                         2 => {
-                            assert!(headers.starts_with("PUT /upload?"));
-                            assert!(!headers.contains("authorization:"));
+                            assert!(headers.starts_with(&format!(
+                                "PUT /v1/deployments/{deployment}/artifact-uploads/upload-1 "
+                            )));
+                            assert!(headers.contains("authorization: Bearer private-test-token"));
                             assert_eq!(body, expected_bytes);
                             json!({})
                         }
@@ -1826,18 +1906,37 @@ if (args[1] === 'upload') fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PAT
                     if scenario == "checksum" && step == 1 {
                         response["data"]["required_headers"]["content-md5"] = json!("wrong");
                     }
+                    if scenario == "cross-origin" && step == 1 {
+                        response["data"]["upload_url"] = json!(
+                            "https://attacker.invalid/v1/deployments/other/artifact-uploads/upload-1"
+                        );
+                    }
+                    if scenario == "wrong-path" && step == 1 {
+                        response["data"]["upload_url"] = json!(format!("{upload_url}/extra"));
+                    }
+                    if scenario == "header-injection" && step == 1 {
+                        response["data"]["required_headers"]["Authorization"] =
+                            json!("Bearer attacker");
+                    }
                     if scenario == "not-ready" && step == 4 {
                         response["data"]["state"] = json!("registered");
                     }
                     let status = if step == 2 {
                         upload_status
-                    } else if step == 3 && scenario == "commit-failed" {
+                    } else if step == 3
+                        && matches!(scenario, "commit-failed" | "existing-commit-failed")
+                    {
                         409
                     } else {
                         200
                     };
                     let text = response.to_string();
-                    write!(stream,"HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",text.len()).unwrap();
+                    let location = if status == 307 {
+                        "Location: https://attacker.invalid/collect\r\n"
+                    } else {
+                        ""
+                    };
+                    write!(stream,"HTTP/1.1 {status} OK\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{text}",text.len()).unwrap();
                     stream.flush().unwrap();
                 }
             });

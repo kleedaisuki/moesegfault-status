@@ -2,7 +2,6 @@
 #![cfg(any(target_arch = "wasm32", test))]
 #[cfg(target_arch = "wasm32")]
 mod platform;
-mod signing;
 use crate::http::HttpError;
 #[cfg(target_arch = "wasm32")]
 pub use platform::{cleanup, handle, handle_with_correlation};
@@ -107,7 +106,7 @@ fn validate_manifest(manifest: &status_domain::DeploymentManifest) -> Result<(),
         return Err(INVALID);
     }
     for a in &manifest.artifacts {
-        if a.size_bytes > 5 * 1024 * 1024 * 1024
+        if a.size_bytes > 64 * 1024 * 1024
             || a.media_type.len() > 255
             || !a.media_type.is_ascii()
             || a.media_type.bytes().any(|b| b < 32 || b == 127)

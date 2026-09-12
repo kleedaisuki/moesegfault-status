@@ -14,6 +14,10 @@ pub fn allows_path(method: &str, path: &str) -> bool {
         || (parts.len() == 2
             && method == "POST"
             && ["artifact-uploads", "artifacts"].contains(&parts[1]))
+        || (parts.len() == 3
+            && method == "PUT"
+            && parts[1] == "artifact-uploads"
+            && status_domain::validate_uuid_v7(parts[2], "upload_id").is_ok())
 }
 /// 只有显式控制平面配置能打开bootstrap；HTTP头无法改变模式。
 /// Only explicit control-plane configuration enables bootstrap; HTTP headers cannot change the mode.
@@ -42,6 +46,14 @@ mod tests {
         assert!(allows_path("PUT", p));
         assert!(!allows_path("GET", p));
         assert!(allows_path("POST", &format!("{p}/artifacts")));
+        let upload = format!("{p}/artifact-uploads/01994800-0000-7000-8000-000000000002");
+        assert!(allows_path("PUT", &upload));
+        assert!(!allows_path("GET", &upload));
+        assert!(!allows_path(
+            "PUT",
+            &format!("{p}/artifact-uploads/not-an-id")
+        ));
+        assert!(!allows_path("PUT", &format!("{upload}/extra")));
         assert!(!allows_path("POST", &format!("{p}/activate")));
     }
 }

@@ -149,10 +149,6 @@ beforeAll(async () => {
                 MACHINE_ISSUER: issuer,
                 MACHINE_AUDIENCE: "status-artifacts",
                 MACHINE_JWKS_URL: `${issuer}/jwks`,
-                R2_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
-                R2_BUCKET_NAME: "rust-artifacts",
-                R2_ACCESS_KEY_ID: "test-access",
-                R2_SECRET_ACCESS_KEY: "test-secret",
               }).map(([k, value]) => [k, { type: "json", value }]),
             ),
           },
@@ -241,7 +237,6 @@ it("registers immutable R2 manifest without falsely becoming ready", async () =>
   expect(JSON.parse(await object!.text()).deployment_id).toBe(deployment);
 });
 it("verifies real R2 bytes, all requirements, and idempotent ready reconciliation", async () => {
-  const bucket = await mf.getR2Bucket("ARTIFACTS", "rust");
   for (const [index, [a, bytes]] of (
     [
       [entry, runtime],
@@ -271,31 +266,96 @@ it("verifies real R2 bytes, all requirements, and idempotent ready reconciliatio
       )
     ).json();
     expect(replay.data.upload_id).toBe(session.upload_id);
+    expect(
+      (
+        await request(
+          "/artifact-uploads",
+          "POST",
+          input,
+          { sub: "other-release" },
+          `stable-key-${index}`,
+        )
+      ).status,
+    ).toBe(403);
     expect(session.required_headers["if-none-match"]).toBe("*");
     const url = new URL(session.upload_url);
-    const key = url.pathname
-      .split("/")
-      .slice(2)
-      .map(decodeURIComponent)
-      .join("/");
-    const metadata = Object.fromEntries(
-      Object.entries(session.required_headers as Record<string, string>)
-        .filter(([k]) => k.startsWith("x-amz-meta-"))
-        .map(([k, v]) => [k.slice(11), v]),
+    expect(url.origin).toBe("https://status.test");
+    expect(url.pathname).toBe(
+      `/v1/deployments/${deployment}/artifact-uploads/${session.upload_id}`,
     );
+    expect(Object.keys(session.required_headers).sort()).toEqual([
+      "content-length",
+      "content-md5",
+      "content-type",
+      "if-none-match",
+    ]);
+    const put = (
+      data: Buffer,
+      claims: Record<string, unknown> = {},
+      headers: Record<string, string> = {},
+    ) =>
+      mf.dispatchFetch(url, {
+        method: "PUT",
+        headers: {
+          ...session.required_headers,
+          authorization: `Bearer ${token(claims)}`,
+          ...headers,
+        },
+        body: data,
+      });
     const commit = { ...a, upload_id: session.upload_id };
     expect((await request("/artifacts", "POST", commit)).status).toBe(422);
+    expect((await put(bytes, { sub: "other-release" })).status).toBe(403);
+    expect((await put(bytes, { scope: "deployments:write" })).status).toBe(403);
+    expect((await put(bytes, {}, { authorization: "" })).status).toBe(401);
+    expect(
+      (await put(bytes, {}, { "content-type": "text/plain" })).status,
+    ).toBe(422);
+    expect((await put(bytes, {}, { "if-none-match": "other" })).status).toBe(
+      422,
+    );
+    expect(
+      (await put(bytes, {}, { "content-md5": "AAAAAAAAAAAAAAAAAAAAAA==" }))
+        .status,
+    ).toBe(422);
+    expect(
+      (
+        await put(
+          bytes.subarray(1),
+          {},
+          { "content-length": String(bytes.length - 1) },
+        )
+      ).status,
+    ).toBe(422);
+    expect((await put(Buffer.alloc(bytes.length, 120))).status).toBe(422);
+    expect((await request("/artifacts", "POST", commit)).status).toBe(422);
+    const uploaded = await Promise.all([put(bytes), put(bytes)]);
+    expect(uploaded.map((r) => r.status).sort()).toEqual([201, 412]);
+    expect((await put(bytes)).status).toBe(412);
+    expect(
+      (await request("/artifacts", "POST", commit, { sub: "other-release" }))
+        .status,
+    ).toBe(403);
     if (index === 0) {
-      await bucket.put(key, Buffer.alloc(bytes.length, 120), {
-        httpMetadata: { contentType: a.media_type },
-        customMetadata: metadata,
-      });
+      // 模拟具有独立存储权限者篡改；commit 仍必须验证实际字节。
+      // Simulate an independently authorized storage writer; commit must still prove bytes.
+      const db = await mf.getD1Database("DB", "rust");
+      const key = await db
+        .prepare(
+          "SELECT object_key FROM artifact_upload_sessions WHERE upload_id=?",
+        )
+        .bind(session.upload_id)
+        .first<string>("object_key");
+      const bucket = await mf.getR2Bucket("ARTIFACTS", "rust");
+      const original = await bucket.get(key!);
+      const metadata = {
+        httpMetadata: original!.httpMetadata,
+        customMetadata: original!.customMetadata,
+      };
+      await bucket.put(key!, Buffer.alloc(bytes.length, 120), metadata);
       expect((await request("/artifacts", "POST", commit)).status).toBe(422);
+      await bucket.put(key!, bytes, metadata);
     }
-    await bucket.put(key, bytes, {
-      httpMetadata: { contentType: a.media_type },
-      customMetadata: metadata,
-    });
     const committed = await request("/artifacts", "POST", commit);
     expect(committed.status, await committed.clone().text()).toBe(201);
     expect((await request("/artifacts", "POST", commit)).status).toBe(200);
@@ -312,3 +372,110 @@ it("verifies real R2 bytes, all requirements, and idempotent ready reconciliatio
       .first("n"),
   ).toBe(1);
 });
+
+it("rejects expired sessions, wrong deployment scope and retired deployment uploads", async () => {
+  const db = await mf.getD1Database("DB", "rust");
+  const session: any = await db
+    .prepare(
+      "SELECT * FROM artifact_upload_sessions WHERE deployment_id=? ORDER BY created_at LIMIT 1",
+    )
+    .bind(deployment)
+    .first();
+  const expiredId = "0199d0a8-2e12-7a59-a51e-000000000099";
+  await db
+    .prepare(
+      "INSERT INTO artifact_upload_sessions(upload_id,deployment_id,idempotency_key,request_digest,object_key,kind,file_name,media_type,size_bytes,artifact_digest,content_md5,build_id,expires_at,created_at,created_by) SELECT ?,deployment_id,'expired-key',request_digest,object_key,kind,file_name,media_type,size_bytes,artifact_digest,content_md5,build_id,'2026-01-01T00:10:00.000Z','2026-01-01T00:00:00.000Z',created_by FROM artifact_upload_sessions WHERE upload_id=?",
+    )
+    .bind(expiredId, session.upload_id)
+    .run();
+  const put = (uploadId: string, claims: Record<string, unknown> = {}) =>
+    mf.dispatchFetch(
+      `https://status.test/v1/deployments/${deployment}/artifact-uploads/${uploadId}`,
+      {
+        method: "PUT",
+        headers: {
+          authorization: `Bearer ${token(claims)}`,
+          "content-type": session.media_type,
+          "content-length": String(runtime.length),
+          "content-md5": session.content_md5,
+          "if-none-match": "*",
+        },
+        body: runtime,
+      },
+    );
+  expect((await put(expiredId)).status).toBe(410);
+  expect(
+    (await put(session.upload_id, { deployment_id: expiredId })).status,
+  ).toBe(403);
+  await db
+    .prepare(
+      "INSERT INTO deployment_status_history(deployment_id,sequence,state,reason,actor_subject,correlation_id,occurred_at) SELECT deployment_id,revision+1,'retired','test retirement','test-admin',?,'2026-09-12T23:00:00.000Z' FROM deployment_current_status WHERE deployment_id=?",
+    )
+    .bind(expiredId, deployment)
+    .run();
+  expect((await put(session.upload_id)).status).toBe(409);
+});
+
+it("rejects artifacts above the 64 MiB transport bound before registration", async () => {
+  expect(
+    (
+      await request("", "PUT", {
+        ...manifest,
+        artifacts: [{ ...entry, size_bytes: 64 * 1024 * 1024 + 1 }, sourceMap],
+      })
+    ).status,
+  ).toBe(422);
+});
+
+it("streams and independently commits a 46 MiB artifact through native R2 and DigestStream", async () => {
+  const largeId = "0199d0a8-2e12-7a59-a51e-000000000100";
+  const bytes = Buffer.alloc(46 * 1024 * 1024, 0x5a);
+  const a = artifact(bytes, "other", "large.blob", "application/octet-stream");
+  const endpoint = `https://status.test/v1/deployments/${largeId}`;
+  const authorization = `Bearer ${token({ deployment_id: largeId })}`;
+  const jsonRequest = (suffix: string, method: string, body: unknown) =>
+    mf.dispatchFetch(`${endpoint}${suffix}`, {
+      method,
+      headers: {
+        authorization,
+        "content-type": "application/json",
+        "idempotency-key": "large-upload-key",
+      },
+      body: JSON.stringify(body),
+    });
+  const registered = await jsonRequest("", "PUT", {
+    ...manifest,
+    deployment_id: largeId,
+    artifact_digest: a.artifact_digest,
+    artifacts: [a],
+  });
+  expect(registered.status, await registered.clone().text()).toBe(201);
+  const session: any = (
+    await (
+      await jsonRequest("/artifact-uploads", "POST", {
+        ...a,
+        content_md5: createHash("md5").update(bytes).digest("base64"),
+      })
+    ).json()
+  ).data;
+  const uploaded = await mf.dispatchFetch(session.upload_url, {
+    method: "PUT",
+    headers: { ...session.required_headers, authorization },
+    body: bytes,
+  });
+  expect(uploaded.status, await uploaded.clone().text()).toBe(201);
+  const committed = await jsonRequest("/artifacts", "POST", {
+    ...a,
+    upload_id: session.upload_id,
+  });
+  expect(committed.status, await committed.clone().text()).toBe(201);
+  const db = await mf.getD1Database("DB", "rust");
+  expect(
+    await db
+      .prepare(
+        "SELECT state FROM deployment_current_status WHERE deployment_id=?",
+      )
+      .bind(largeId)
+      .first("state"),
+  ).toBe("ready");
+}, 60_000);

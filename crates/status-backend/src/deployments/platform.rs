@@ -11,6 +11,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use status_domain::{Artifact, DeploymentManifest, Environment};
 use std::collections::{BTreeMap, HashMap};
+use wasm_bindgen::{JsCast, JsValue};
+use wasm_bindgen_futures::JsFuture;
 use worker::{Context, Env, Method, Request, Response};
 const INTERNAL: HttpError = HttpError::new(
     503,
@@ -91,9 +93,10 @@ pub async fn handle_with_correlation(
         return Ok(None);
     };
     let parts = rest.split('/').collect::<Vec<_>>();
-    if parts.len() > 2
+    if parts.len() > 3
         || parts.is_empty()
-        || (parts.len() == 2 && !["artifact-uploads", "artifacts"].contains(&parts[1]))
+        || (parts.len() >= 2 && !["artifact-uploads", "artifacts"].contains(&parts[1]))
+        || (parts.len() == 3 && parts[1] != "artifact-uploads")
     {
         return Ok(None);
     }
@@ -105,7 +108,8 @@ pub async fn handle_with_correlation(
             return Err(INVALID);
         }
         if !(parts.len() == 1 && request.method() == Method::Put
-            || parts.len() == 2 && request.method() == Method::Post)
+            || parts.len() == 2 && request.method() == Method::Post
+            || parts.len() == 3 && request.method() == Method::Put)
         {
             return Err(HttpError::new(
                 405,
@@ -135,6 +139,8 @@ pub async fn handle_with_correlation(
         };
         if parts.len() == 1 {
             register(request, parts[0], &state).await
+        } else if parts.len() == 3 {
+            transfer(request, parts[0], parts[2], &state).await
         } else if parts[1] == "artifact-uploads" {
             upload(request, parts[0], &state).await
         } else {
@@ -307,7 +313,7 @@ fn input(value: Value, extra: &str) -> Result<(Artifact, String), HttpError> {
         .ok_or(INVALID)?;
     let a: Artifact = serde_json::from_value(Value::Object(map)).map_err(|_| INVALID)?;
     a.validate().map_err(|_| INVALID)?;
-    if a.size_bytes > 5 * 1024 * 1024 * 1024
+    if a.size_bytes > 64 * 1024 * 1024
         || a.media_type.len() > 255
         || !a.media_type.is_ascii()
         || a.media_type.bytes().any(|b| b < 32 || b == 127)
@@ -330,7 +336,7 @@ async fn required(s: &State<'_>, id: &str, a: &Artifact) -> Result<(), HttpError
     }
     Ok(())
 }
-/// 已签名但不作为字节证据的来源元数据。 / Signed provenance metadata is not byte-level evidence.
+/// 服务端生成但不作为字节证据的来源元数据。 / Server-generated provenance metadata is not byte-level evidence.
 fn metadata(row: &Value, a: &Artifact) -> HashMap<String, String> {
     HashMap::from([
         (
@@ -357,8 +363,11 @@ async fn replay(
     key: &str,
     hash: &str,
 ) -> Result<Option<Value>, HttpError> {
-    let row=s.db.first::<Value>(&Query::new("SELECT i.request_digest,i.response_json,s.expires_at FROM idempotency_keys i JOIN artifact_upload_sessions s ON s.upload_id=i.resource_id WHERE i.scope=? AND i.idempotency_key=?",vec![scope.into(),key.into()])).await.map_err(|_|INTERNAL)?;
+    let row=s.db.first::<Value>(&Query::new("SELECT i.request_digest,i.response_json,s.expires_at,s.created_by FROM idempotency_keys i JOIN artifact_upload_sessions s ON s.upload_id=i.resource_id WHERE i.scope=? AND i.idempotency_key=?",vec![scope.into(),key.into()])).await.map_err(|_|INTERNAL)?;
     let Some(row) = row else { return Ok(None) };
+    if row["created_by"].as_str() != Some(s.identity.subject()) {
+        return Err(FORBIDDEN);
+    }
     if row["request_digest"] != hash {
         return Err(CONFLICT);
     }
@@ -401,7 +410,7 @@ async fn upload(
     if decoded.len() != 16 || base64::engine::general_purpose::STANDARD.encode(decoded) != md5 {
         return Err(INVALID);
     }
-    let row = deployment(deployment_id, s).await?;
+    deployment(deployment_id, s).await?;
     required(s, deployment_id, &a).await?;
     let scope = format!("deployment-artifact-upload:{deployment_id}");
     if let Some(body) = replay(s, &scope, &key, &hash).await? {
@@ -411,39 +420,19 @@ async fn upload(
     let now = chrono::DateTime::parse_from_rfc3339(&s.now).map_err(|_| INTERNAL)?;
     let expires =
         (now + chrono::Duration::seconds(600)).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let mut headers = BTreeMap::from([
+    let headers: BTreeMap<String, String> = BTreeMap::from([
         ("content-length".into(), a.size_bytes.to_string()),
         ("content-type".into(), a.media_type.clone()),
         ("content-md5".into(), md5.clone()),
         ("if-none-match".into(), "*".into()),
     ]);
-    for (k, v) in metadata(&row, &a) {
-        headers.insert(format!("x-amz-meta-{k}"), v);
-    }
-    let account = variable(s.env, "R2_ACCOUNT_ID")?;
-    let bucket = variable(s.env, "R2_BUCKET_NAME")?;
-    let access = s
-        .env
-        .secret("R2_ACCESS_KEY_ID")
-        .map_err(|_| INTERNAL)?
-        .to_string();
-    let secret = s
-        .env
-        .secret("R2_SECRET_ACCESS_KEY")
-        .map_err(|_| INTERNAL)?
-        .to_string();
-    let (url, headers) = super::signing::sign(
-        super::signing::Config {
-            account: &account,
-            bucket: &bucket,
-            access: &access,
-            secret: &secret,
-        },
-        &object,
-        headers,
-        &now.format("%Y%m%dT%H%M%SZ").to_string(),
-    )?;
     let upload_id = id();
+    let origin = request
+        .url()
+        .map_err(|_| INVALID)?
+        .origin()
+        .ascii_serialization();
+    let url = format!("{origin}/v1/deployments/{deployment_id}/artifact-uploads/{upload_id}");
     let body = json!({"upload_id":upload_id,"method":"PUT","upload_url":url,"required_headers":headers,"expires_at":expires});
     let queries=[Query::new("INSERT INTO artifact_upload_sessions(upload_id,deployment_id,idempotency_key,request_digest,object_key,kind,file_name,media_type,size_bytes,artifact_digest,content_md5,build_id,expires_at,created_at,created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",vec![upload_id.clone().into(),deployment_id.into(),key.clone().into(),hash.clone().into(),object.into(),label(a.kind).into(),a.file_name.into(),a.media_type.into(),(a.size_bytes as i64).into(),a.artifact_digest.into(),md5.into(),optional(a.build_id.as_deref()),expires.into(),s.now.clone().into(),s.identity.subject().into()]),Query::new("INSERT INTO idempotency_keys(scope,idempotency_key,request_digest,resource_type,resource_id,response_status,response_json,created_at,expires_at) VALUES(?,?,?,'artifact_upload',?,201,?,?,?)",vec![scope.clone().into(),key.clone().into(),hash.clone().into(),upload_id.into(),body.to_string().into(),s.now.clone().into(),(now+chrono::Duration::days(1)).to_rfc3339_opts(chrono::SecondsFormat::Millis,true).into()]),audit(s,"deployment.artifact-upload.created",deployment_id)];
     if s.db.batch(&queries).await.is_err() {
@@ -454,6 +443,94 @@ async fn upload(
     }
     Ok((201, body))
 }
+/// JWT 授权的有界原生流式上传；URL 本身不是凭据。
+/// JWT-authorized bounded native streaming upload; the URL is not a credential.
+async fn transfer(
+    request: &mut Request,
+    deployment_id: &str,
+    upload_id: &str,
+    s: &State<'_>,
+) -> Result<(u16, Value), HttpError> {
+    status_domain::validate_uuid_v7(upload_id, "upload_id").map_err(|_| INVALID)?;
+    let row = deployment(deployment_id, s).await?;
+    let session =
+        s.db.first::<Value>(&Query::new(
+            "SELECT * FROM artifact_upload_sessions WHERE upload_id=? AND deployment_id=?",
+            vec![upload_id.into(), deployment_id.into()],
+        ))
+        .await
+        .map_err(|_| INTERNAL)?
+        .ok_or(INVALID)?;
+    if session["created_by"].as_str() != Some(s.identity.subject()) {
+        return Err(FORBIDDEN);
+    }
+    if session["expires_at"].as_str().ok_or(INTERNAL)? <= s.now.as_str() {
+        return Err(HttpError::new(
+            410,
+            "upload-expired",
+            "Create a new upload session",
+        ));
+    }
+    let a: Artifact = serde_json::from_value(json!({
+        "kind": session["kind"], "file_name": session["file_name"],
+        "media_type": session["media_type"], "size_bytes": session["size_bytes"],
+        "artifact_digest": session["artifact_digest"], "build_id": session["build_id"]
+    }))
+    .map_err(|_| INTERNAL)?;
+    a.validate().map_err(|_| INVALID)?;
+    if a.size_bytes > 64 * 1024 * 1024 {
+        return Err(INVALID);
+    }
+    required(s, deployment_id, &a).await?;
+    for (name, expected) in [
+        ("content-length", a.size_bytes.to_string()),
+        ("content-type", a.media_type.clone()),
+        (
+            "content-md5",
+            session["content_md5"].as_str().ok_or(INTERNAL)?.into(),
+        ),
+        ("if-none-match", "*".into()),
+    ] {
+        if request.headers().get(name).map_err(|_| INVALID)?.as_deref() != Some(&expected) {
+            return Err(INVALID);
+        }
+    }
+    // 保留平台已知长度的请求流；不克隆、不转换为 Rust Vec、不信任客户端元数据。
+    // Preserve the platform's known-length request stream; no clone, Rust Vec or client metadata.
+    let body = request.inner().body().ok_or(INVALID)?;
+    let sha = a.artifact_digest.strip_prefix("sha256:").ok_or(INVALID)?;
+    let sha = (0..64)
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&sha[i..i + 2], 16))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| INVALID)?;
+    let bucket = s.env.bucket("ARTIFACTS").map_err(|_| INTERNAL)?;
+    let object = bucket
+        .put(session["object_key"].as_str().ok_or(INTERNAL)?, body)
+        .only_if(worker::Conditional {
+            etag_does_not_match: Some("*".into()),
+            ..Default::default()
+        })
+        .sha256(sha)
+        .http_metadata(worker::HttpMetadata {
+            content_type: Some(a.media_type.clone()),
+            ..Default::default()
+        })
+        .custom_metadata(metadata(&row, &a))
+        .execute()
+        .await
+        .map_err(|_| INVALID)?
+        .ok_or(HttpError::new(
+            412,
+            "artifact-already-exists",
+            "Immutable object already exists",
+        ))?;
+    if object.size() != a.size_bytes {
+        return Err(INVALID);
+    }
+    Ok((201, json!({"upload_id":upload_id})))
+}
+
 /// 比较会话/提交所有不可变字段。 / Compare all immutable session/commit fields.
 fn matches(row: &Value, a: &Artifact) -> bool {
     row["kind"] == label(a.kind)
@@ -462,6 +539,67 @@ fn matches(row: &Value, a: &Artifact) -> bool {
         && row["size_bytes"] == a.size_bytes
         && row["artifact_digest"] == a.artifact_digest
         && row["build_id"] == serde_json::to_value(&a.build_id).unwrap()
+}
+/// 平台原生流式 SHA-256；每个产物只有 32 字节摘要跨越 Wasm 边界。
+/// Native streaming SHA-256; only the 32-byte artifact digest crosses the Wasm boundary.
+async fn stream_digest(stream: web_sys::ReadableStream) -> Result<String, HttpError> {
+    let crypto = js_sys::Reflect::get(&js_sys::global(), &"crypto".into()).map_err(|_| INTERNAL)?;
+    let constructor = js_sys::Reflect::get(&crypto, &"DigestStream".into())
+        .map_err(|_| INTERNAL)?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| INTERNAL)?;
+    let arguments = js_sys::Array::of1(&JsValue::from_str("SHA-256"));
+    let sink = js_sys::Reflect::construct(&constructor, &arguments).map_err(|_| INTERNAL)?;
+    let digest = js_sys::Reflect::get(&sink, &"digest".into())
+        .map_err(|_| INTERNAL)?
+        .dyn_into::<js_sys::Promise>()
+        .map_err(|_| INTERNAL)?;
+    let pipe = js_sys::Reflect::get(stream.as_ref(), &"pipeTo".into())
+        .map_err(|_| INTERNAL)?
+        .dyn_into::<js_sys::Function>()
+        .map_err(|_| INTERNAL)?
+        .call1(stream.as_ref(), &sink)
+        .map_err(|_| INTERNAL)?
+        .dyn_into::<js_sys::Promise>()
+        .map_err(|_| INTERNAL)?;
+    // 同时订阅两个 Promise，流错误不得成为未处理拒绝或成功摘要。
+    // Observe both promises together; a stream error must not become an unhandled rejection or success.
+    let (_, digest) = futures_util::try_join!(JsFuture::from(pipe), JsFuture::from(digest))
+        .map_err(|_| INTERNAL)?;
+    let digest = js_sys::Uint8Array::new(&digest).to_vec();
+    if digest.len() != 32 {
+        return Err(INTERNAL);
+    }
+    Ok(format!(
+        "sha256:{}",
+        digest
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    ))
+}
+
+/// 仅 source map 必须进 Rust 做结构校验；明确 8 MiB 内存上界。
+/// Only source maps enter Rust for structural validation, with an explicit 8 MiB memory bound.
+async fn read_map(stream: web_sys::ReadableStream, expected: u64) -> Result<Vec<u8>, HttpError> {
+    if expected > 8 * 1024 * 1024 {
+        return Err(INVALID);
+    }
+    let mut response =
+        Response::from_body(worker::ResponseBody::Stream(stream)).map_err(|_| INTERNAL)?;
+    let mut stream = response.stream().map_err(|_| INTERNAL)?;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|_| INTERNAL)?;
+        if bytes.len() as u64 + chunk.len() as u64 > expected {
+            return Err(INVALID);
+        }
+        bytes.extend(chunk);
+    }
+    if bytes.len() as u64 != expected {
+        return Err(INVALID);
+    }
+    Ok(bytes)
 }
 /// 验证真实字节并防止HEAD/GET替换。 / Verify actual bytes and detect HEAD/GET substitution.
 async fn verify(s: &State<'_>, row: &Value, a: &Artifact, key: &str) -> Result<(), HttpError> {
@@ -480,30 +618,29 @@ async fn verify(s: &State<'_>, row: &Value, a: &Artifact, key: &str) -> Result<(
         return Err(INVALID);
     }
     let version = object.version();
-    let mut stream = object
+    let worker::ResponseBody::Stream(stream) = object
         .body()
         .ok_or(INVALID)?
-        .stream()
-        .map_err(|_| INTERNAL)?;
-    let mut hash = Sha256::new();
-    let mut length = 0u64;
-    let mut map = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| INTERNAL)?;
-        length += chunk.len() as u64;
-        if length > a.size_bytes {
-            return Err(INVALID);
-        }
-        hash.update(&chunk);
-        if a.kind == status_domain::ArtifactKind::SourceMap {
-            map.extend(chunk);
-        }
-    }
-    if length != a.size_bytes || format!("sha256:{:x}", hash.finalize()) != a.artifact_digest {
-        return Err(INVALID);
-    }
-    if a.kind == status_domain::ArtifactKind::SourceMap {
+        .response_body()
+        .map_err(|_| INTERNAL)?
+    else {
+        return Err(INTERNAL);
+    };
+    let hash = if a.kind == status_domain::ArtifactKind::SourceMap {
+        let branches = stream.tee();
+        let hash_stream = branches.get(0).dyn_into().map_err(|_| INTERNAL)?;
+        let map_stream = branches.get(1).dyn_into().map_err(|_| INTERNAL)?;
+        let (hash, map) = futures_util::try_join!(
+            stream_digest(hash_stream),
+            read_map(map_stream, a.size_bytes)
+        )?;
         validate_map(&map, &a.file_name)?;
+        hash
+    } else {
+        stream_digest(stream).await?
+    };
+    if hash != a.artifact_digest {
+        return Err(INVALID);
     }
     if bucket
         .head(key)
@@ -540,6 +677,9 @@ async fn commit(
         .ok_or(INVALID)?;
     if !matches(&session, &a) || !session["content_md5"].is_string() {
         return Err(CONFLICT);
+    }
+    if session["created_by"].as_str() != Some(s.identity.subject()) {
+        return Err(FORBIDDEN);
     }
     if let Some(existing) = artifact(s, deployment_id, &a).await? {
         if !matches(&existing, &a) {

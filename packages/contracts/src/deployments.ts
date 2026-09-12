@@ -14,8 +14,10 @@ export const DEPLOYMENT_MANIFEST_MAX_BODY_BYTES = 1024 * 1024;
 /** Artifact 会话/提交请求的 HTTP body 上限 / HTTP body limit for artifact session and commit requests. */
 export const ARTIFACT_REQUEST_MAX_BODY_BYTES = 16 * 1024;
 
-/** S3-compatible Content-MD5（16-byte digest 的 Base64）/ S3-compatible Content-MD5 (Base64 of a 16-byte digest). */
+/** 上传字节 MD5 校验值 / Upload Content-MD5 (Base64 of a 16-byte digest). */
 export const ContentMd5Schema = z.string().regex(/^[A-Za-z0-9+/]{22}==$/);
+/** 原生 R2 单件上传上限 / Native R2 per-artifact upload ceiling. */
+export const ARTIFACT_MAX_BYTES = 64 * 1024 * 1024;
 /** Source map 的硬大小上限 / Hard byte-size limit for source maps. */
 export const SOURCE_MAP_MAX_BYTES = 8 * 1024 * 1024;
 
@@ -46,11 +48,7 @@ const ArtifactMediaTypeSchema = z
   .max(127)
   .regex(/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i);
 
-const ArtifactSizeSchema = z
-  .number()
-  .int()
-  .positive()
-  .max(5 * 1024 * 1024 * 1024);
+const ArtifactSizeSchema = z.number().int().positive().max(ARTIFACT_MAX_BYTES);
 const BuildIdSchema = z.string().min(1).max(256);
 const ArtifactBaseShape = {
   file_name: ArtifactFileNameSchema,
@@ -237,19 +235,13 @@ export type CreateArtifactUploadRequest = z.infer<
 export const ArtifactUploadSessionSchema = z.strictObject({
   upload_id: UuidV7Schema,
   method: z.literal("PUT"),
-  upload_url: HttpsUrlSchema,
+  upload_url: HttpsUrlSchema.describe(
+    "Same-origin authenticated upload endpoint, not an anonymous presigned URL; send an artifacts:write Bearer JWT and reject redirects",
+  ),
   required_headers: z.strictObject({
     "content-type": z.string().min(3).max(127),
     "content-length": z.string().regex(/^[1-9][0-9]{0,12}$/),
     "content-md5": ContentMd5Schema,
-    "x-amz-meta-deployment-id": UuidV7Schema,
-    "x-amz-meta-git-commit": z
-      .string()
-      .regex(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
-    "x-amz-meta-artifact-digest": Sha256DigestSchema,
-    "x-amz-meta-artifact-kind": ArtifactKindSchema,
-    "x-amz-meta-artifact-file-name": ArtifactFileNameSchema,
-    "x-amz-meta-build-id": z.string().min(1).max(256),
     "if-none-match": z.literal("*"),
   }),
   expires_at: UtcDateTimeSchema,

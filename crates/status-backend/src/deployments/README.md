@@ -4,17 +4,18 @@
 
 - `PUT /v1/deployments/{uuidv7}` requires `deployments:write`.
 - `POST /v1/deployments/{uuidv7}/artifact-uploads` requires `artifacts:write`, an 8–256 character `Idempotency-Key`, and artifact fields plus canonical Base64 `content_md5`.
+- `PUT /v1/deployments/{uuidv7}/artifact-uploads/{upload_uuidv7}` requires `artifacts:write` and the session creator identity; it streams the request into the private R2 binding. / 每次原生上传都重新验证机器 JWT 和会话创建者。
 - `POST /v1/deployments/{uuidv7}/artifacts` requires `artifacts:write` and the same artifact fields plus `upload_id`.
 
-All routes verify the configured machine JWT issuer/audience/JWKS and exact service, environment, deployment claims. HTTP headers cannot activate bootstrap mode. Public URLs, repository URLs and filenames never cause server-side fetches. Signing only targets the configured account's R2 endpoint and bucket. 所有路由使用正常机器 JWT 认证，并精确校验 service/environment/deployment 授权；不会抓取用户提供的 URL。
+All routes verify the configured machine JWT issuer/audience/JWKS and exact service, environment, deployment claims. HTTP headers cannot activate bootstrap mode. Public URLs, repository URLs and filenames never cause server-side fetches. Uploads only target the configured private R2 binding; there are no S3 credentials or signed bearer URLs. 所有路由使用正常机器 JWT 认证，并精确校验 service/environment/deployment 授权；不会抓取用户提供的 URL。
 
 ## Immutable writes / 不可变写入
 
 Manifest canonical JSON uses sorted object keys, normalized domain serialization and SHA-256. The server conditionally writes its R2 object (`If-None-Match: *`), re-reads and proves its digest before the D1 registration transaction. Registration always records `registered → artifacts_pending`, never ready. 同一 ID 不同内容冲突；相同内容可重放。R2/D1 不共享事务，因此先验证 R2 再提交 D1。
 
-Artifact keys are `observability/artifacts/sha256/<prefix>/<digest>/<deployment>/<kind>/<encoded-filename>`. SigV4 covers the key, size, media type, transport MD5, provenance metadata and `If-None-Match: *`. A client receiving R2 412 should proceed to commit, not overwrite. URLs expire after ten minutes; idempotent replay of an expired session returns 410. 签名 URL 是短期 bearer 凭据，不得记录到日志。
+Artifact keys are `observability/artifacts/sha256/<prefix>/<digest>/<deployment>/<kind>/<encoded-filename>`. Session URLs use the registry request origin and the exact upload UUID path, are not bearer credentials, and expire after ten minutes. The authenticated PUT verifies creator, deployment lifecycle, exact content type/length/MD5 headers, and `If-None-Match: *` before passing the original known-length request stream to R2. The immutable R2 put is conditioned on nonexistence, checks the predeclared SHA-256 against actual bytes, and generates provenance metadata server-side. Uploads are limited to 64 MiB per artifact (source maps retain their stricter 8 MiB limit), without buffering uploaded bodies into Rust memory. A client receiving 412 proceeds to commit, never overwrites. Idempotent replay also checks creator and expiry. / 原生绑定流式传输不需要 S3 密钥；URL 不能代替每次 JWT 鉴权。并发上传只能有一次写入成功。MD5 字段仍用于协议一致性，R2 真实完整性校验使用 SHA-256。
 
-Commit independently reads and incrementally hashes the actual R2 bytes with Rust SHA-256, verifies length and all metadata, then compares the object version again. Hashing uses bounded memory; maps alone are buffered, limited to 8 MiB. MD5 is only transport protection, never provenance authority. Source maps require UTF-8 JSON revision 3, string sources/mappings, and matching optional `file`. This is structural verification, not proof of every mapping's correctness. 提交依赖真实 SHA-256 字节证据，而不是客户端声明或 MD5。
+Commit independently reads and incrementally hashes the actual R2 bytes with platform-native `crypto.DigestStream("SHA-256")`, called directly from Rust, verifies length and all metadata, then compares the object version again. Hashing never copies artifact chunks into Wasm; only the 32-byte digest returns to Rust. Both pipe and digest promises are awaited. Maps alone are concurrently buffered for structural parsing, limited to 8 MiB. / 原生流式摘要避免大型调试产物逐块进入 Wasm 的 CPU 和复制开销；仍校验真实字节，不信任自定义元数据。 MD5 is only transport protection, never provenance authority. Source maps require UTF-8 JSON revision 3, string sources/mappings, and matching optional `file`. This is structural verification, not proof of every mapping's correctness. 提交依赖真实 SHA-256 字节证据，而不是客户端声明或 MD5。
 
 Artifact insertion and audit are one D1 transaction. The INSERT itself excludes retired/failed states, preventing a retirement/cleanup race even when HTTP authorization happened earlier. Every successful replay reconciles readiness; readiness occurs only when all immutable requirements exactly match committed rows. Concurrent revision conflicts are re-read, not treated as automatic success. 管理员激活由独立管理路由执行，本模块不会自动切换流量。
 
@@ -27,7 +28,7 @@ Matching signed Build ID metadata and immutable digests establish the declared p
 ## Controlled first deployment / 受控首次部署
 
 1. An account-authorized operator explicitly deploys the same Rust Worker with `BOOTSTRAP_MODE=true`, real JWT trust configuration, D1 and approved R2 bindings/secrets. This is a control-plane installation, **not** an activated application release.
-2. The root router applies `bootstrap::allows` **before all business routes**. Only the three machine deployment endpoints are reachable; health/status/admin/telemetry return 503. Their JWT checks remain unchanged.
+2. The root router applies `bootstrap::allows` **before all business routes**. Only the four machine deployment endpoints are reachable; health/status/admin/telemetry return 503. Their JWT checks remain unchanged.
 3. The release machine registers the production manifest, uploads every runtime/debug artifact, commits each and observes ready.
 4. The operator deploys the normal configuration with `BOOTSTRAP_MODE=false`; the normal readiness/activation gate applies. An administrator activates through the ordinary protected activation API.
 
@@ -46,12 +47,13 @@ Matching signed Build ID metadata and immutable digests establish the declared p
 - `worker-build tests/rust-runtime --release --no-opt -- --locked`
 - `node node_modules/vitest/vitest.mjs run tests/artifacts-rust.test.ts`
 
-The SigV4 fixed vector was independently generated with the migration baseline's aws4fetch 1.0.20 (the old runtime dependency has since been removed). SQLite tests extract production Rust SQL and apply every real migration; they test immutable sessions and retirement/cleanup races without a database stub. The workerd integration suite uses real Rust handlers, independent RSA-signed JWTs, local JWKS, migrated D1 and local R2. It proves manifest persistence, byte-hash rejection, per-artifact readiness and replay auditing. Tests inject object bytes through the real R2 binding; they do not claim live S3 presigned-URL acceptance. 当前账户 R2 尚未开通，因此未声称线上 R2 上传成功。
+SQLite tests extract production Rust SQL and apply every real migration; they test immutable sessions and retirement/cleanup races without a database stub. The workerd integration suite uses real Rust handlers, independent RSA-signed JWTs, local JWKS, migrated D1 and local R2. It exercises actual authenticated HTTP uploads, checksum rejection, concurrent create-only writes, per-artifact readiness and replay auditing. A 46 MiB real upload and commit checks the large-debug-artifact path; it is not a production CPU-limit measurement. Local tests are not evidence of a successful production deployment. / 测试通过真实 HTTP 上传和 R2 绑定验证协议，不伪称本地测试证明线上发布。
 
 References / 官方参考:
 
-- [R2 presigned URLs](https://developers.cloudflare.com/r2/api/s3/presigned-urls/)
+- [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
 - [Workers best practices](https://developers.cloudflare.com/workers/best-practices/workers-best-practices/)
+- [Workers DigestStream](https://developers.cloudflare.com/workers/runtime-apis/web-crypto/)
 - [R2 consistency](https://developers.cloudflare.com/r2/reference/consistency/)
 
 ## Security boundary and research / 安全边界与研究

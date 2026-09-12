@@ -54,6 +54,12 @@ pnpm --filter @moesegfault/contracts generate:openapi
 pnpm --filter @moesegfault/contracts test
 ```
 
-生成器仅声明 `docs/status-design.md` 中的十条公共/机器 HTTP 路由。管理能力通过 Service Binding typed RPC 提供，不会进入公网 OpenAPI。
+生成器仅声明 `docs/status-design.md` 中的十一条公共/机器 HTTP 路由。管理能力通过 Service Binding typed RPC 提供，不会进入公网 OpenAPI。
 
-The generator declares only the ten public/machine HTTP routes in `docs/status-design.md`. Administrative capabilities use typed Service Binding RPC and never enter the public OpenAPI document.
+The generator declares only the eleven public/machine HTTP routes in `docs/status-design.md`. Administrative capabilities use typed Service Binding RPC and never enter the public OpenAPI document.
+
+## 原生上传边界 / Native upload boundary
+
+未正式发布的 S3 预签名协议已替换，不保留兼容入口。D1 上传会话有效期为 600 秒；客户端只能向 API 同源 URL 发送携带 `artifacts:write` JWT 的 PUT，拒绝跨域和重定向。`required_headers` 只有 Content-Type、Content-Length、Content-MD5、If-None-Match；对象元数据由服务端读取声明设置。每件上限 64 MiB，source map 仍为 8 MiB。R2 原生条件写禁止覆盖，412 后继续 commit 核验，不得伪造 ready。
+
+The unreleased S3 presigning protocol is replaced without a compatibility endpoint. D1 upload sessions expire after 600 seconds. PUT requires an `artifacts:write` JWT, an API-same-origin URL, and no redirects. The four predefined headers bind media type, length, checksum, and create-only semantics; object metadata is server-owned. Artifacts are capped at 64 MiB, source maps at 8 MiB. A 412 permits verification through commit, never overwrite or bypass of registry readiness.

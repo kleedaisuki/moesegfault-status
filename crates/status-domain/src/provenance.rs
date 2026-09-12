@@ -67,9 +67,11 @@ impl Artifact {
         if self.media_type.trim().is_empty()
             || !valid_file_name(&self.file_name)
             || self.size_bytes == 0
+            || self.size_bytes > 64 * 1024 * 1024
         {
             return Err(DomainError::Validation(
-                "artifact requires positive size, media_type, and safe ASCII file_name".into(),
+                "artifact requires a size in 1..=64 MiB, media_type, and safe ASCII file_name"
+                    .into(),
             ));
         }
         if matches!(self.kind, ArtifactKind::DebugSymbols | ArtifactKind::Binary)
@@ -560,6 +562,15 @@ mod tests {
             build_id: None,
         });
         assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn artifacts_fit_the_native_upload_boundary() {
+        let mut artifact = manifest().artifacts.remove(0);
+        artifact.size_bytes = 64 * 1024 * 1024;
+        artifact.validate().unwrap();
+        artifact.size_bytes += 1;
+        assert!(artifact.validate().is_err());
     }
 
     #[test]

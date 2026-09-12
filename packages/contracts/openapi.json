@@ -1987,7 +1987,7 @@
       "post": {
         "operationId": "createDeploymentArtifactUpload",
         "summary": "Create a restricted artifact upload session",
-        "description": "The returned URL performs a conditional content-addressed PUT. A 412 from that URL means the immutable key already exists (for example after session renewal); clients must continue to artifact commit, whose server-side byte digest verification is authoritative, and must never attempt an overwrite.",
+        "description": "A D1-backed session expires after 600 seconds. The returned URL is on this API origin and requires a fresh artifacts:write machine Bearer JWT on PUT; it is not an anonymous S3 presigned URL. Clients must reject cross-origin URLs and redirects. The PUT conditionally creates a content-addressed object through the native R2 binding. A 412 from that URL means the immutable key already exists (for example after session renewal); clients must continue to artifact commit, whose server-side byte digest verification is authoritative, and must never attempt an overwrite.",
         "security": [{ "machineBearer": [] }],
         "parameters": [
           {
@@ -2125,6 +2125,317 @@
           },
           "409": {
             "description": "Immutable identifier or revision conflict",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "413": {
+            "description": "Request body too large",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "422": {
+            "description": "Semantically invalid request",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "429": {
+            "description": "Rate limit exceeded",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "503": {
+            "description": "Temporarily unavailable",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/deployments/{deployment_id}/artifact-uploads/{upload_id}": {
+      "put": {
+        "operationId": "uploadDeploymentArtifact",
+        "summary": "Upload immutable artifact bytes through native R2",
+        "description": "Requires artifacts:write on every request and a matching unexpired D1 session (600 seconds). Send the exact session-provided Content-Type, Content-Length, Content-MD5 and If-None-Match headers plus Authorization: Bearer. Reject cross-origin upload URLs and redirects. Native R2 writes are create-only; 412 must never cause an overwrite. Continue to artifact commit after 201 or 412: only server-side SHA-256 verification and registration can make a deployment ready. Source maps retain their stricter 8 MiB ceiling.",
+        "security": [{ "machineBearer": [] }],
+        "x-body-max-bytes": 67108864,
+        "x-required-scope": "artifacts:write",
+        "parameters": [
+          {
+            "name": "deployment_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          {
+            "name": "upload_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+            }
+          },
+          {
+            "name": "Content-Type",
+            "in": "header",
+            "required": true,
+            "description": "Exact media type returned by the upload session.",
+            "schema": { "type": "string" }
+          },
+          {
+            "name": "Content-Length",
+            "in": "header",
+            "required": true,
+            "description": "Exact declared byte length, at most 64 MiB.",
+            "schema": { "type": "integer", "minimum": 1, "maximum": 67108864 }
+          },
+          {
+            "name": "Content-MD5",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "pattern": "^[A-Za-z0-9+/]{22}==$" }
+          },
+          {
+            "name": "If-None-Match",
+            "in": "header",
+            "required": true,
+            "schema": { "type": "string", "const": "*" }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "*/*": { "schema": { "type": "string", "format": "binary" } }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Immutable bytes stored; explicit artifact commit is still required",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["data", "meta"],
+                  "properties": {
+                    "data": {
+                      "type": "object",
+                      "required": ["upload_id"],
+                      "properties": {
+                        "upload_id": {
+                          "type": "string",
+                          "format": "uuid",
+                          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                        }
+                      }
+                    },
+                    "meta": { "type": "object" }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Malformed request",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "401": {
+            "description": "Authentication required",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "403": {
+            "description": "Insufficient scope or claim mismatch",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "404": {
+            "description": "Resource not found",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "409": {
+            "description": "Immutable identifier or revision conflict",
+            "headers": {
+              "x-moesegfault-correlation-id": {
+                "description": "RFC 9562 UUIDv7 execution correlation identifier.",
+                "required": true,
+                "schema": {
+                  "type": "string",
+                  "format": "uuid",
+                  "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+                }
+              }
+            },
+            "content": {
+              "application/problem+json": {
+                "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+              }
+            }
+          },
+          "412": {
+            "description": "Immutable object already exists; verify through artifact commit, never overwrite",
             "headers": {
               "x-moesegfault-correlation-id": {
                 "description": "RFC 9562 UUIDv7 execution correlation identifier.",
@@ -3302,7 +3613,7 @@
                     "size_bytes": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 5368709120
+                      "maximum": 67108864
                     },
                     "artifact_digest": {
                       "type": "string",
@@ -3343,7 +3654,7 @@
                     "size_bytes": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 5368709120
+                      "maximum": 67108864
                     },
                     "artifact_digest": {
                       "type": "string",
@@ -3425,7 +3736,7 @@
                     "size_bytes": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 5368709120
+                      "maximum": 67108864
                     },
                     "artifact_digest": {
                       "type": "string",
@@ -3465,7 +3776,7 @@
                     "size_bytes": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 5368709120
+                      "maximum": 67108864
                     },
                     "artifact_digest": {
                       "type": "string",
@@ -3505,7 +3816,7 @@
                     "size_bytes": {
                       "type": "integer",
                       "exclusiveMinimum": 0,
-                      "maximum": 5368709120
+                      "maximum": 67108864
                     },
                     "artifact_digest": {
                       "type": "string",
@@ -3615,7 +3926,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -3661,7 +3972,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -3750,7 +4061,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -3795,7 +4106,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -3840,7 +4151,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -3889,7 +4200,8 @@
           "upload_url": {
             "type": "string",
             "maxLength": 2048,
-            "format": "uri"
+            "format": "uri",
+            "description": "Same-origin authenticated upload endpoint, not an anonymous presigned URL; send an artifacts:write Bearer JWT and reject redirects"
           },
           "required_headers": {
             "type": "object",
@@ -3907,61 +4219,12 @@
                 "type": "string",
                 "pattern": "^[A-Za-z0-9+/]{22}==$"
               },
-              "x-amz-meta-deployment-id": {
-                "type": "string",
-                "allOf": [
-                  {
-                    "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
-                  },
-                  {
-                    "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
-                  }
-                ],
-                "format": "uuid",
-                "description": "RFC 9562 UUIDv7 in lowercase canonical form"
-              },
-              "x-amz-meta-git-commit": {
-                "type": "string",
-                "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
-              },
-              "x-amz-meta-artifact-digest": {
-                "type": "string",
-                "pattern": "^sha256:[0-9a-f]{64}$"
-              },
-              "x-amz-meta-artifact-kind": {
-                "type": "string",
-                "enum": [
-                  "binary",
-                  "debug_symbols",
-                  "source_map",
-                  "sbom",
-                  "manifest",
-                  "other"
-                ]
-              },
-              "x-amz-meta-artifact-file-name": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 255,
-                "pattern": "^[A-Za-z0-9][A-Za-z0-9._+-]*$"
-              },
-              "x-amz-meta-build-id": {
-                "type": "string",
-                "minLength": 1,
-                "maxLength": 256
-              },
               "if-none-match": { "type": "string", "const": "*" }
             },
             "required": [
               "content-type",
               "content-length",
               "content-md5",
-              "x-amz-meta-deployment-id",
-              "x-amz-meta-git-commit",
-              "x-amz-meta-artifact-digest",
-              "x-amz-meta-artifact-kind",
-              "x-amz-meta-artifact-file-name",
-              "x-amz-meta-build-id",
               "if-none-match"
             ],
             "additionalProperties": false
@@ -4009,7 +4272,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -4064,7 +4327,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -4171,7 +4434,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -4225,7 +4488,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",
@@ -4279,7 +4542,7 @@
               "size_bytes": {
                 "type": "integer",
                 "exclusiveMinimum": 0,
-                "maximum": 5368709120
+                "maximum": 67108864
               },
               "artifact_digest": {
                 "type": "string",

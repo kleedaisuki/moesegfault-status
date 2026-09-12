@@ -2,6 +2,9 @@ import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import {
   AdminPrincipalSchema,
+  ARTIFACT_MAX_BYTES,
+  ArtifactUploadSessionSchema,
+  DeploymentArtifactDeclarationSchema,
   DiagnosticEventSchema,
   DiagnosticQueueEnvelopeSchema,
   DeploymentManifestSchema,
@@ -478,5 +481,69 @@ describe("OpenAPI", () => {
       readFileSync(new URL("../openapi.json", import.meta.url), "utf8"),
     );
     expect(generated).toEqual(buildOpenApiDocument());
+  });
+});
+
+/** 原生 R2 上传边界回归 / Native R2 upload boundary regressions. */
+describe("native R2 upload contracts", () => {
+  it.each(["binary", "debug_symbols", "sbom", "manifest", "other"])(
+    "caps %s at 64 MiB",
+    (kind) => {
+      const declaration = {
+        kind,
+        file_name: "artifact.wasm",
+        media_type: "application/wasm",
+        size_bytes: ARTIFACT_MAX_BYTES,
+        artifact_digest: "sha256:" + "a".repeat(64),
+        build_id: "build",
+      };
+      expect(
+        DeploymentArtifactDeclarationSchema.safeParse(declaration).success,
+      ).toBe(true);
+      expect(
+        DeploymentArtifactDeclarationSchema.safeParse({
+          ...declaration,
+          size_bytes: ARTIFACT_MAX_BYTES + 1,
+        }).success,
+      ).toBe(false);
+    },
+  );
+  it("returns only the four predefined upload headers, without S3 metadata", () => {
+    const session = {
+      upload_id: eventId,
+      method: "PUT",
+      upload_url: `https://status.example.com/v1/deployments/${deploymentId}/artifact-uploads/${eventId}`,
+      expires_at: "2026-09-12T00:10:00.000Z",
+      required_headers: {
+        "content-type": "application/wasm",
+        "content-length": "1",
+        "content-md5": "1B2M2Y8AsgTpgAmY7PhCfg==",
+        "if-none-match": "*",
+      },
+    };
+    expect(ArtifactUploadSessionSchema.safeParse(session).success).toBe(true);
+    expect(
+      ArtifactUploadSessionSchema.safeParse({
+        ...session,
+        required_headers: {
+          ...session.required_headers,
+          "x-amz-meta-deployment-id": deploymentId,
+        },
+      }).success,
+    ).toBe(false);
+  });
+  it("documents authenticated create-only PUT and explicit commit", () => {
+    const document = buildOpenApiDocument() as any;
+    const put =
+      document.paths[
+        "/v1/deployments/{deployment_id}/artifact-uploads/{upload_id}"
+      ].put;
+    expect(put.security).toEqual([{ machineBearer: [] }]);
+    expect(put["x-required-scope"]).toBe("artifacts:write");
+    expect(put["x-body-max-bytes"]).toBe(ARTIFACT_MAX_BYTES);
+    expect(put.responses["201"]).toBeDefined();
+    expect(put.responses["412"]).toBeDefined();
+    expect(put.description).toContain("600 seconds");
+    expect(put.description).toContain("Reject");
   });
 });

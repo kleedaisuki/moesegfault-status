@@ -6,6 +6,7 @@ import {
 } from "./diagnostics.js";
 import {
   ARTIFACT_REQUEST_MAX_BODY_BYTES,
+  ARTIFACT_MAX_BYTES,
   ArtifactUploadSessionSchema,
   CreateArtifactUploadRequestSchema,
   CreateDeploymentArtifactRequestSchema,
@@ -78,6 +79,12 @@ export const httpRouteManifest = [
     method: "POST",
     path: "/v1/deployments/{deployment_id}/artifact-uploads",
     operation_id: "createDeploymentArtifactUpload",
+    security: "machine",
+  },
+  {
+    method: "PUT",
+    path: "/v1/deployments/{deployment_id}/artifact-uploads/{upload_id}",
+    operation_id: "uploadDeploymentArtifact",
     security: "machine",
   },
   {
@@ -477,7 +484,7 @@ export function buildOpenApiDocument(): Record<string, unknown> {
           operationId: "createDeploymentArtifactUpload",
           summary: "Create a restricted artifact upload session",
           description:
-            "The returned URL performs a conditional content-addressed PUT. A 412 from that URL means the immutable key already exists (for example after session renewal); clients must continue to artifact commit, whose server-side byte digest verification is authoritative, and must never attempt an overwrite.",
+            "A D1-backed session expires after 600 seconds. The returned URL is on this API origin and requires a fresh artifacts:write machine Bearer JWT on PUT; it is not an anonymous S3 presigned URL. Clients must reject cross-origin URLs and redirects. The PUT conditionally creates a content-addressed object through the native R2 binding. A 412 from that URL means the immutable key already exists (for example after session renewal); clients must continue to artifact commit, whose server-side byte digest verification is authoritative, and must never attempt an overwrite.",
           security: [{ machineBearer: [] }],
           parameters: [deploymentIdParameter, idempotencyKeyParameter],
           "x-body-max-bytes": ARTIFACT_REQUEST_MAX_BODY_BYTES,
@@ -495,6 +502,84 @@ export function buildOpenApiDocument(): Record<string, unknown> {
             "201": jsonResponse(
               "Restricted upload session created",
               "ArtifactUploadSession",
+            ),
+            ...commonProblems,
+          },
+        },
+      },
+      "/v1/deployments/{deployment_id}/artifact-uploads/{upload_id}": {
+        put: {
+          operationId: "uploadDeploymentArtifact",
+          summary: "Upload immutable artifact bytes through native R2",
+          description:
+            "Requires artifacts:write on every request and a matching unexpired D1 session (600 seconds). Send the exact session-provided Content-Type, Content-Length, Content-MD5 and If-None-Match headers plus Authorization: Bearer. Reject cross-origin upload URLs and redirects. Native R2 writes are create-only; 412 must never cause an overwrite. Continue to artifact commit after 201 or 412: only server-side SHA-256 verification and registration can make a deployment ready. Source maps retain their stricter 8 MiB ceiling.",
+          security: [{ machineBearer: [] }],
+          "x-body-max-bytes": ARTIFACT_MAX_BYTES,
+          "x-required-scope": "artifacts:write",
+          parameters: [
+            deploymentIdParameter,
+            { ...deploymentIdParameter, name: "upload_id" },
+            {
+              name: "Content-Type",
+              in: "header",
+              required: true,
+              description: "Exact media type returned by the upload session.",
+              schema: { type: "string" },
+            },
+            {
+              name: "Content-Length",
+              in: "header",
+              required: true,
+              description: "Exact declared byte length, at most 64 MiB.",
+              schema: {
+                type: "integer",
+                minimum: 1,
+                maximum: ARTIFACT_MAX_BYTES,
+              },
+            },
+            {
+              name: "Content-MD5",
+              in: "header",
+              required: true,
+              schema: { type: "string", pattern: "^[A-Za-z0-9+/]{22}==$" },
+            },
+            {
+              name: "If-None-Match",
+              in: "header",
+              required: true,
+              schema: { type: "string", const: "*" },
+            },
+          ],
+          requestBody: {
+            required: true,
+            content: {
+              "*/*": { schema: { type: "string", format: "binary" } },
+            },
+          },
+          responses: {
+            "201": {
+              description:
+                "Immutable bytes stored; explicit artifact commit is still required",
+              headers: { "x-moesegfault-correlation-id": correlationHeader },
+              content: {
+                "application/json": {
+                  schema: {
+                    type: "object",
+                    required: ["data", "meta"],
+                    properties: {
+                      data: {
+                        type: "object",
+                        required: ["upload_id"],
+                        properties: { upload_id: deploymentIdParameter.schema },
+                      },
+                      meta: { type: "object" },
+                    },
+                  },
+                },
+              },
+            },
+            "412": problemResponse(
+              "Immutable object already exists; verify through artifact commit, never overwrite",
             ),
             ...commonProblems,
           },
