@@ -2,27 +2,30 @@
 
 Rust 实现的 Cloudflare Workers 运维后端，TypeScript 实现的运维前端。 / A Rust Cloudflare Workers operations backend with a TypeScript operations frontend.
 
-**代码与平台集成正在最终验收；不能把本地测试当作线上部署证明。远端 D1 的 8 个迁移已应用；应用尚未完成云端发布，R2 尚未开通。** / **Final code/platform acceptance is in progress; local tests are not production evidence. Eight remote D1 migrations are applied; application cloud release and R2 provisioning remain outstanding.**
+**Rust 后端迁移及本地验收已完成；不能把本地测试当作线上部署证明。远端 D1 的 8 个迁移已应用；应用尚未完成云端发布，R2 尚未开通。** / **Rust backend migration and local acceptance are complete; local tests are not production evidence. Eight remote D1 migrations are applied; application cloud release and R2 provisioning remain outstanding.**
+
+统一验收命令与边界见 [Rust 验收记录](docs/rust-acceptance.md)。 / See the [Rust acceptance record](docs/rust-acceptance.md) for consolidated checks and limitations.
 
 ## 结构 / Structure
 
-| 路径 / Path                 | 职责 / Responsibility                                                                                                         |
-| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `crates/status-domain`      | 无 I/O 领域规则，后端直接调用 / Pure domain rules called directly by Rust                                                     |
-| `crates/status-backend`     | HTTP、认证、D1、管理、诊断、调度、探针、R2、遥测和通知 / Backend application and platform logic                               |
-| `crates/status-worker`      | status 的公开 HTTP、Queue 与 Cron 入口 / Public HTTP, Queue and Cron entrypoints                                              |
-| `crates/admin-rpc-worker`   | 同一个 status Worker 的独立命名私有 RPC 模块 / Separate named private RPC module in the same status Worker                    |
-| `crates/ops-gateway-worker` | Rust Access/CSRF 管理网关 / Rust administrative trust boundary                                                                |
-| `crates/probe-worker`       | Rust 私有区域探针 / Rust private regional executor                                                                            |
-| `crates/status-build`       | SDK 构建、模块组装、运行字节与调试符号分离 / SDK build, assembly and symbol separation                                        |
-| `crates/status-release`     | 来源、实际上传字节审计、上传及 ready 发布门禁 / Provenance, byte audit, uploads and release gates                             |
-| `apps/ops`                  | TypeScript 运维 UI / TypeScript operations UI                                                                                 |
-| `packages/contracts`        | 前端类型、契约测试与 OpenAPI；不是服务器验证实现 / Frontend types, contract tests and OpenAPI, not server validation          |
-| `migrations`                | D1 schema 迁移 / D1 schema migrations                                                                                         |
-| `tests`                     | Rust、SQLite、workerd 与 TypeScript 测试驱动 / Native, SQLite and workerd validation; TypeScript test drivers                 |
-| `workers`                   | 部署配置和操作说明，不承载 TypeScript 后端业务 / Deployment configuration and runbooks, not TypeScript backend business logic |
+| 路径 / Path                 | 职责 / Responsibility                                                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/status-domain`      | 无 I/O 领域规则，后端直接调用 / Pure domain rules called directly by Rust                                                                      |
+| `crates/status-backend`     | HTTP、认证、D1、管理、诊断、调度、探针、R2、遥测和通知 / Backend application and platform logic                                                |
+| `crates/status-worker`      | status 的公开 HTTP、Queue 与 Cron 入口 / Public HTTP, Queue and Cron entrypoints                                                               |
+| `crates/admin-rpc-worker`   | 同一个 status Worker 的独立命名私有 RPC 模块 / Separate named private RPC module in the same status Worker                                     |
+| `crates/ops-gateway-worker` | Rust Access/CSRF 管理网关 / Rust administrative trust boundary                                                                                 |
+| `crates/probe-worker`       | Rust 私有区域探针 / Rust private regional executor                                                                                             |
+| `crates/status-build`       | SDK 构建、模块组装、运行字节与调试符号分离 / SDK build, assembly and symbol separation                                                         |
+| `crates/status-release`     | 来源、实际上传字节审计、上传及 ready 发布门禁 / Provenance, byte audit, uploads and release gates                                              |
+| `crates/diagnostic-client`  | Rust 诊断生产者 SDK：资源绑定、脱敏与有界尽力投递 / Rust diagnostic producer SDK: resource binding, redaction and bounded best-effort delivery |
+| `apps/ops`                  | TypeScript 运维 UI / TypeScript operations UI                                                                                                  |
+| `packages/contracts`        | 前端类型、契约测试与 OpenAPI；不是服务器验证实现 / Frontend types, contract tests and OpenAPI, not server validation                           |
+| `migrations`                | D1 schema 迁移 / D1 schema migrations                                                                                                          |
+| `tests`                     | Rust、SQLite、workerd 与 TypeScript 测试驱动 / Native, SQLite and workerd validation; TypeScript test drivers                                  |
+| `workers`                   | 部署配置和操作说明，不承载 TypeScript 后端业务 / Deployment configuration and runbooks, not TypeScript backend business logic                  |
 
-生成的 JavaScript 仅用于官方 SDK 胶水与声明式模块导出；没有手写 TypeScript 业务转发层。 / Generated JavaScript is SDK glue and declarative module exports, not a handwritten TypeScript business forwarding layer.
+后端诊断生产者 SDK 也使用 Rust，旧 TypeScript diagnostic-client/telemetry 不属于目标架构。生成的 JavaScript 仅用于官方 SDK 胶水与声明式模块导出；没有手写 TypeScript 业务转发层。 / The backend diagnostic producer SDK is also Rust; legacy TypeScript diagnostic-client/telemetry packages are not part of the target architecture. Generated JavaScript is SDK glue and declarative module exports, not a handwritten TypeScript business forwarding layer.
 
 ## 本地开发 / Local development
 

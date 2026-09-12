@@ -24,18 +24,19 @@ Private binding >| admin-rpc-worker: named AdminRpc     |
 
 `status-build` 将两个独立 SDK 模块组装为同一个 status Worker 的模块图（Module Graph）：公开默认入口与命名 `AdminRpc` 分别导出，不能把含管理方法的同一个类同时别名为 default。命名入口不意味着新增一个 Worker 或另设 D1 权威源；私有管理能力也不是公网 HTTP 隧道。 / `status-build` assembles separate SDK modules into one status Worker: the public default export and named `AdminRpc` are distinct. Never alias a management-bearing class as the default. Named RPC does not introduce another Worker, database authority or public HTTP tunnel. [Cloudflare RPC](https://developers.cloudflare.com/workers/runtime-apis/bindings/service-bindings/rpc/)
 
-| Rust 范围 / Scope                                                                 | 实现位置 / Implementation                                                 |
-| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| 领域规则、直接依赖计算 / Domain and dependency evaluation                         | `status-domain`                                                           |
-| JWT、Access、请求限制、游标 / Authentication and boundaries                       | `status-backend/{auth,access,http,cursor,wire}`                           |
-| 六个公开查询 / Six public reads                                                   | `status-backend/public`                                                   |
-| 管理读写、审计、幂等和原子 outbox / Admin, audit, deduplication and atomic outbox | `status-backend/admin`                                                    |
-| 诊断、证据查询与恢复 / Diagnostics, evidence and recovery                         | `status-backend/{diagnostics,evidence}`                                   |
-| 租约、评估、调度与探测 / Leases, evaluation, scheduling and probes                | `status-backend/{scheduling,probes}`                                      |
-| 注册、上传、ready 与首次引导 / Registration, artifacts, readiness and bootstrap   | `status-backend/{deployments,bootstrap}`                                  |
-| 遥测与通知 / Telemetry and notifications                                          | `status-backend/{telemetry,notifications}`                                |
-| 平台入口 / Platform entrypoints                                                   | `status-worker`, `admin-rpc-worker`, `ops-gateway-worker`, `probe-worker` |
-| 原生构建与发布工具 / Native build and release tools                               | `status-build`, `status-release`                                          |
+| Rust 范围 / Scope                                                                 | 实现位置 / Implementation                                                                                                |
+| --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| 领域规则、直接依赖计算 / Domain and dependency evaluation                         | `status-domain`                                                                                                          |
+| JWT、Access、请求限制、游标 / Authentication and boundaries                       | `status-backend/{auth,access,http,cursor,wire}`                                                                          |
+| 六个公开查询 / Six public reads                                                   | `status-backend/public`                                                                                                  |
+| 管理读写、审计、幂等和原子 outbox / Admin, audit, deduplication and atomic outbox | `status-backend/admin`                                                                                                   |
+| 诊断、证据查询与恢复 / Diagnostics, evidence and recovery                         | `status-backend/{diagnostics,evidence}`                                                                                  |
+| 租约、评估、调度与探测 / Leases, evaluation, scheduling and probes                | `status-backend/{scheduling,probes}`                                                                                     |
+| 注册、上传、ready 与首次引导 / Registration, artifacts, readiness and bootstrap   | `status-backend/{deployments,bootstrap}`                                                                                 |
+| 遥测与通知 / Telemetry and notifications                                          | `status-backend/{telemetry,notifications}`                                                                               |
+| 平台入口 / Platform entrypoints                                                   | `status-worker`, `admin-rpc-worker`, `ops-gateway-worker`, `probe-worker`                                                |
+| 原生构建与发布工具 / Native build and release tools                               | `status-build`, `status-release`                                                                                         |
+| 后端诊断生产者 SDK / Backend diagnostic producer SDK                              | `diagnostic-client`（Rust；资源绑定、脱敏、有界尽力投递 / resource binding, redaction and bounded best-effort delivery） |
 
 模块存在不是验收通过的充分条件；最终集成以当前测试与发布检查实际结果为准。 / Module presence is not proof of acceptance; current integration tests and release checks remain authoritative.
 
@@ -54,6 +55,8 @@ Private binding >| admin-rpc-worker: named AdminRpc     |
 首次引导不是跳过安全检查：注册 API 仍验证机器 JWT，其余业务入口保持不可用；部署成功后还需要烟雾测试（Smoke Test）与独立 Access 管理员激活。 / Bootstrap does not bypass authentication: registration still requires machine JWT, other business entrypoints remain unavailable, and deployment requires subsequent smoke tests and separate Access-admin activation. See [release runbook](../scripts/release/rust-release-README.md).
 
 ## 证据与尚未证明的事项 / Evidence and limits
+
+已执行的专项验证包含 Rust `diagnostic-client` 的原生与真实 workerd 测试、最终组装 status 产物的 workerd 入口验证，以及真实 Queue → 通知 → 死信队列（Dead-Letter Queue, DLQ）路径。后端生产者 SDK 与遥测实现统一为 Rust，旧 TypeScript 对应实现正在清理，不作为备用业务层保留。这些是本地专项证据，不代表完整测试集、GitHub Actions 或云端发布均已完成。 / Executed focused checks cover the Rust diagnostic client in native and actual workerd tests, entrypoints of the assembled status artifact, and an actual local Queue → notification → DLQ path. Backend producer SDK and telemetry implementations are Rust; superseded TypeScript implementations have been removed, not retained as a fallback business layer. These local focused checks do not establish complete-suite, GitHub Actions or cloud-release completion.
 
 | 层级 / Layer                              | 能证明 / Demonstrates                                                 | 不能替代 / Does not replace                                                         |
 | ----------------------------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
