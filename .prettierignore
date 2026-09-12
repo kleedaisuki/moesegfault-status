@@ -1,0 +1,11 @@
+node_modules
+target
+.wrangler
+dist
+pkg
+pnpm-lock.yaml
+Cargo.lock
+**/worker-configuration.d.ts
+# 保留输入设计文档原始排版。 / Preserve the supplied design documents' original layout.
+docs/status-design.md
+docs/observability-standard.md

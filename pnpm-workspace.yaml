@@ -1,0 +1,12 @@
+# 独立部署单元共享契约。 / Independent deployments share contracts.
+packages:
+  - packages/*
+  - workers/*
+  - apps/*
+allowBuilds:
+  esbuild: true
+  workerd: true
+minimumReleaseAgeExclude:
+  - miniflare@5.20260911.0-alpha
+  - wrangler@4.131.1
+  - "@redocly/cli@2.52.1"

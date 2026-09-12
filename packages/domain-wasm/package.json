@@ -1,0 +1,12 @@
+{
+  "name": "@moesegfault/domain-wasm",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "node ../../scripts/build-wasm.mjs"
+  }
+}
