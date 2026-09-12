@@ -16,11 +16,14 @@
   "workers_dev": false,
   "preview_urls": false,
   "compatibility_date": "2026-09-12",
+  // 静态前端由平台托管；认证/API请求必须进入 Rust，不允许 SPA 回退绕过。
+  // The platform serves static UI; authentication/API requests must enter Rust, never SPA fallback.
+  "assets": {
+    "directory": "../../apps/ops/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"],
+  },
   "vars": {
-    "ACCESS_ISSUER": "https://REPLACE-ME.cloudflareaccess.com",
-    "ACCESS_AUDIENCE": "REPLACE_ME",
-    "ACCESS_MAX_TOKEN_AGE_SECONDS": "86400",
-    "ACCESS_ROLE_MAPPING": "{}",
     "OPS_ORIGIN": "https://ops.moesegfault.dev",
     "DEPLOYMENT_ID": "",
     "GIT_COMMIT": "",

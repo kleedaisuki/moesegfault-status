@@ -143,6 +143,7 @@ fn sdk_build(root: &Path, crate_name: &str) -> Result<PathBuf> {
         .env_remove("COREDUMP_FLAGS")
         .env_remove("RUN_TO_COMPLETION")
         .env_remove("MOE_MACHINE_JWT")
+        .env_remove("MACHINE_JWT_PRIVATE_KEY")
         .env_remove("CLOUDFLARE_API_TOKEN");
     execute(&mut command, &format!("worker-build {crate_name}"))?;
     Ok(crate_dir.join("build"))
@@ -188,6 +189,7 @@ fn transform(root: &Path, input: &Path, output: &Path) -> Result<()> {
         .arg(serde_json::to_string(&options)?)
         .current_dir(source_directory)
         .env_remove("MOE_MACHINE_JWT")
+        .env_remove("MACHINE_JWT_PRIVATE_KEY")
         .env_remove("CLOUDFLARE_API_TOKEN");
     execute(&mut command, "esbuild source-map transform")
 }
@@ -364,12 +366,65 @@ fn build_service(root: &Path, service: Service) -> Result<Value> {
         &out.join(service.name()),
         root,
     )?;
-    let inventory = json!({"wrangler_config":service.config(),"wrangler_entrypoint":format!("dist/rust/{0}/{0}.js",service.name()),"require_source_map":true,"artifacts":artifacts});
+    let asset_manifest = if service == Service::Ops {
+        Some(assemble_static_assets(root, &mut artifacts)?)
+    } else {
+        None
+    };
+    let mut inventory = json!({"wrangler_config":service.config(),"wrangler_entrypoint":format!("dist/rust/{0}/{0}.js",service.name()),"require_source_map":true,"artifacts":artifacts});
+    if let Some(path) = asset_manifest {
+        inventory["asset_manifest"] = json!(path);
+    }
     fs::write(
         out.join(format!("{}.artifacts.json", service.name())),
         serde_json::to_vec_pretty(&inventory)?,
     )?;
     Ok(inventory)
+}
+
+/// 静态资源使用真实 MIME；未知格式明确失败，绝不为绕过门禁而伪装二进制。
+/// Use actual static MIME types; fail on unknown formats rather than disguise them to bypass gates.
+fn static_media(path: &str) -> Result<&'static str> {
+    status_release::asset_media_type(path)
+}
+/// 枚举已编译 Vite 字节并写入路径/MIME/SHA256 清单；不触发 Vite 或发布。
+/// Inventory already-built Vite bytes by path/MIME/SHA256; never invoke Vite or deployment here.
+fn assemble_static_assets(root: &Path, artifacts: &mut Vec<Value>) -> Result<String> {
+    let directory = root.join("apps/ops/dist");
+    ensure!(
+        directory.join("index.html").is_file(),
+        "build the ops Vite app before the Rust ops assembly"
+    );
+    let mut records = Vec::new();
+    for path in status_release::static_files_in(&directory)? {
+        let bytes = fs::read(directory.join(&path))?;
+        let media = static_media(&path)?;
+        records.push(status_release::asset_record(&path, media, &bytes)?);
+        let mut artifact = declaration(
+            format!("apps/ops/dist/{path}"),
+            if path.ends_with(".map") {
+                "source_map"
+            } else {
+                "other"
+            },
+            media,
+            None,
+        );
+        artifact["asset_path"] = json!(path);
+        artifacts.push(artifact);
+    }
+    let path = "dist/rust/ops.assets-manifest.json";
+    fs::write(
+        root.join(path),
+        status_release::canonical(&json!({"schema_version":1,"files":records})),
+    )?;
+    artifacts.push(declaration(
+        path.into(),
+        "manifest",
+        "application/json",
+        None,
+    ));
+    Ok(path.into())
 }
 /// 合并非秘密模板，使用 release crate 的严格配置和产物校验。
 /// Merge secret-free metadata and use release crate's strict configuration and artifact validation.
@@ -440,6 +495,52 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn static_inventory_keeps_real_mime_and_registers_path_manifest() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fs::canonicalize(fixture.path()).unwrap();
+        let dist = root.join("apps/ops/dist");
+        fs::create_dir_all(dist.join("assets")).unwrap();
+        fs::create_dir_all(root.join("dist/rust")).unwrap();
+        fs::write(dist.join("index.html"), "<!doctype html><title>Ops</title>").unwrap();
+        fs::write(
+            dist.join("assets/app.js"),
+            "export const n = 1;\n//# sourceMappingURL=app.js.map\n",
+        )
+        .unwrap();
+        fs::write(
+            dist.join("assets/app.js.map"),
+            r#"{"version":3,"sources":["src/app.ts"],"mappings":"AAAA"}"#,
+        )
+        .unwrap();
+        fs::write(dist.join("assets/style.css"), "body { color: pink; }").unwrap();
+        let mut artifacts = Vec::new();
+        let manifest = assemble_static_assets(&root, &mut artifacts).unwrap();
+        let js = artifacts
+            .iter()
+            .find(|a| a["asset_path"] == "assets/app.js")
+            .unwrap();
+        assert_eq!(js["media_type"], "text/javascript");
+        assert_eq!(
+            artifacts
+                .iter()
+                .find(|a| a["asset_path"] == "assets/app.js.map")
+                .unwrap()["kind"],
+            "source_map"
+        );
+        assert_eq!(
+            artifacts
+                .iter()
+                .find(|a| a["asset_path"] == "index.html")
+                .unwrap()["media_type"],
+            "text/html"
+        );
+        let body: Value = serde_json::from_slice(&fs::read(root.join(manifest)).unwrap()).unwrap();
+        assert_eq!(body["files"].as_array().unwrap().len(), 4);
+        assert!(static_media("unknown.extension").is_err());
+        fs::write(dist.join("_redirects"), "/* https://unreviewed.example 302").unwrap();
+        assert!(assemble_static_assets(&root, &mut Vec::new()).is_err());
+    }
     /// 真正的 esbuild 映射必须保持相对源路径，尤其覆盖 Windows canonical 路径。
     /// Actual esbuild maps must retain relative sources, especially with Windows canonical paths.
     #[test]

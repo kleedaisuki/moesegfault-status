@@ -1,0 +1,112 @@
+name: Release a production Worker version
+
+# 仅发布既有 Worker 的版本；DNS、域名、routes、triggers 和首次 bootstrap 只允许本机运维。
+# Publish versions of existing Workers only; DNS, domains, routes, triggers, and first bootstrap remain local operations.
+on:
+  workflow_dispatch:
+    inputs:
+      service:
+        description: 要构建并发布的 Worker / Worker to build and release
+        required: true
+        type: choice
+        options:
+          - status
+          - ops
+          - probe
+      version:
+        description: 不可变服务版本，例如 0.2.0 / Immutable service version, for example 0.2.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-release-${{ inputs.service }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # 从其他 ref 手工触发不会取得 environment secrets。 / Dispatches from other refs never receive environment secrets.
+    if: github.ref == 'refs/heads/main'
+    name: Build, register and release ${{ inputs.service }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: production-release
+    env:
+      CI: "true"
+    steps:
+      - name: Check out the dispatched main commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: ./.github/actions/setup-js
+      - uses: ./.github/actions/setup-rust-wasm
+      - name: Install pinned Workers Rust build tool
+        run: cargo install worker-build --version 0.8.5 --locked
+      - name: Build and test operations UI before Rust static-asset inventory
+        if: inputs.service == 'ops'
+        run: |
+          pnpm --filter @moesegfault/ops test
+          pnpm build:frontend
+      - name: Generate secret-free immutable release metadata
+        env:
+          RELEASE_SERVICE: ${{ inputs.service }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: >-
+          node scripts/release/prepare-metadata.mjs
+          --service "${RELEASE_SERVICE}"
+          --version "${RELEASE_VERSION}"
+          --output "${RUNNER_TEMP}/release-metadata.json"
+      - name: Build actual Rust Worker, maps, symbols and release inventory
+        env:
+          RELEASE_SERVICE: ${{ inputs.service }}
+        run: >-
+          cargo run --locked -p status-build --
+          --service "${RELEASE_SERVICE}"
+          --release-template "${RUNNER_TEMP}/release-metadata.json"
+      - name: Revalidate manifest without cloud access
+        env:
+          RELEASE_SERVICE: ${{ inputs.service }}
+        run: >-
+          cargo run --locked -p status-release --
+          --config "release.${RELEASE_SERVICE}.json" --verify-only
+          > "${RUNNER_TEMP}/release-manifest.json"
+      - name: Register artifacts, require ready, then publish this exact version
+        # 三个秘密仅存在于真正发布步骤；status-release 只调用 versions upload/deploy。
+        # All three secrets exist only in the publishing step; status-release calls versions upload/deploy only.
+        env:
+          RELEASE_SERVICE: ${{ inputs.service }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          MACHINE_JWT_PRIVATE_KEY: ${{ secrets.MACHINE_JWT_PRIVATE_KEY }}
+          MOE_RELEASE_API_URL: https://status.moesegfault.dev
+        run: >-
+          cargo run --locked -p status-release --
+          --config "release.${RELEASE_SERVICE}.json"
+      - name: Explain a blocked release without weakening the gate
+        if: failure()
+        run: |
+          {
+            echo '### Production release blocked'
+            echo ''
+            echo '- The release command returned non-zero; no fallback or bootstrap bypass was attempted.'
+            echo '- Missing service catalog/bootstrap state, JWT/JWKS mismatch, R2 failure, artifact commit failure, or a non-ready deployment is an expected hard stop before version upload.'
+            echo '- DNS, routes, custom domains, triggers, and first bootstrap remain explicit local operations.'
+          } >> "${GITHUB_STEP_SUMMARY}"
+      - name: Record the deliberately narrow deployment boundary
+        env:
+          RELEASED_SERVICE: ${{ inputs.service }}
+          RELEASED_VERSION: ${{ inputs.version }}
+        run: |
+          {
+            echo '### Production version release'
+            echo ''
+            echo "- Service: \`${RELEASED_SERVICE}\`"
+            echo "- Version: \`${RELEASED_VERSION}\`"
+            echo "- Source: \`${GITHUB_SHA}\`"
+            echo '- The readiness gate completed before version upload.'
+            echo '- This workflow did not manage DNS, routes, custom domains, triggers, or first bootstrap.'
+          } >> "${GITHUB_STEP_SUMMARY}"

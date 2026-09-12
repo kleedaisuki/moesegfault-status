@@ -22,7 +22,7 @@
     "typecheck": "pnpm --filter @moesegfault/contracts typecheck && pnpm --filter @moesegfault/ops typecheck",
     "format:check": "prettier --check .",
     "format": "prettier --write .",
-    "build": "pnpm build:backend && pnpm build:frontend",
+    "build": "pnpm build:frontend && pnpm build:backend",
     "deploy:check": "wrangler deploy --dry-run --config wrangler.jsonc && wrangler deploy --dry-run --config workers/ops-gateway/wrangler.jsonc && wrangler deploy --dry-run --config workers/probe-executor/wrangler.jsonc",
     "db:migrate:local": "wrangler d1 migrations apply moesegfault-status --local",
     "db:migrate:remote": "wrangler d1 migrations apply moesegfault-status --remote"

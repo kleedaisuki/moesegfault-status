@@ -1,6 +1,6 @@
 //! 不可变 Rust Worker 发布事务。 / Immutable Rust Worker release transaction.
 //! 注册、受限上传和 ready 门禁先于部署；激活保留 Access admin 审批。
-//! Registration, scoped uploads and readiness precede deployment; activation remains admin-approved.
+//! Registration, scoped uploads and readiness precede deployment; activation remains administrator-approved.
 
 use anyhow::{Context, Result, bail, ensure};
 use base64::{
@@ -34,6 +34,9 @@ pub struct ArtifactInput {
     pub media_type: String,
     /// Wasm 的规范非 custom section 摘要。 / Canonical non-custom-section Wasm digest.
     pub build_id: Option<String>,
+    /// 静态站点内的相对 URL 路径；缺省表示 Worker 模块或私有符号。
+    /// Relative static-site URL path; absent for Worker modules or private symbols.
+    pub asset_path: Option<String>,
 }
 
 /// 可审计且不含秘密的发布配置。 / Auditable secret-free release configuration.
@@ -73,6 +76,19 @@ pub struct ReleaseConfig {
     /// Node 执行的 Wrangler JS 入口。 / Wrangler JavaScript entrypoint executed by Node.
     #[serde(default = "default_wrangler")]
     pub wrangler_cli: PathBuf,
+    /// 绑定静态 URL 路径、MIME 和字节的 manifest 产物路径。
+    /// Manifest artifact binding static URL paths, MIME types and exact bytes.
+    pub asset_manifest: Option<PathBuf>,
+    /// 固定机器令牌 issuer origin；仅从环境私钥签发时必需。
+    /// Pinned machine-token issuer origin; required when minting from an environment private key.
+    pub status_origin: Option<String>,
+    /// 仓库内受审查的公共 JWKS 文件。 / Reviewed public JWKS file inside the repository.
+    #[serde(default = "default_machine_jwks")]
+    pub machine_jwks: PathBuf,
+}
+/// 默认公共密钥路径。 / Default public key path.
+fn default_machine_jwks() -> PathBuf {
+    "config/machine-jwks.json".into()
 }
 /// 默认本地固定依赖。 / Default locally pinned dependency.
 fn default_wrangler() -> PathBuf {
@@ -89,6 +105,8 @@ pub struct PreparedArtifact {
     pub declaration: Artifact,
     /// R2 传输 MD5。 / R2 transport MD5.
     pub content_md5: String,
+    /// 静态资产路径，不进入 Worker 模块集合。 / Static asset path, excluded from Worker modules.
+    pub asset_path: Option<String>,
 }
 /// 返回契约 SHA-256。 / Return the contract SHA-256 representation.
 pub fn sha256(bytes: &[u8]) -> String {
@@ -179,6 +197,13 @@ pub fn prepare(config: &ReleaseConfig, base: &Path) -> Result<Vec<PreparedArtifa
             "artifact exceeds 128 MiB client limit"
         );
         let bytes = fs::read(&path)?;
+        if let Some(asset_path) = &input.asset_path {
+            asset_record(asset_path, &input.media_type, &bytes)?;
+            ensure!(
+                matches!(input.kind, ArtifactKind::Other | ArtifactKind::SourceMap),
+                "static assets must retain other/source_map classification"
+            );
+        }
         let declaration = Artifact {
             kind: input.kind,
             file_name: name,
@@ -196,11 +221,13 @@ pub fn prepare(config: &ReleaseConfig, base: &Path) -> Result<Vec<PreparedArtifa
             content_md5: STANDARD.encode(Md5::digest(&bytes)),
             bytes,
             declaration,
+            asset_path: input.asset_path.clone(),
         });
     }
     let entry = within(base, &config.wrangler_entrypoint)?;
     ensure!(
         artifacts.iter().any(|a| a.path == entry
+            && a.asset_path.is_none()
             && matches!(
                 a.declaration.kind,
                 ArtifactKind::Other | ArtifactKind::Binary
@@ -242,7 +269,121 @@ pub fn prepare(config: &ReleaseConfig, base: &Path) -> Result<Vec<PreparedArtifa
                 .any(|a| a.declaration.kind == ArtifactKind::SourceMap),
         "source map required"
     );
+    validate_asset_manifest(config, base, &artifacts)?;
     Ok(artifacts)
+}
+
+/// 校验静态路径并生成可独立审计的内容记录；路径从不作为 shell 参数拼接。
+/// Validate a static path and produce an auditable content record; paths are never shell-interpolated.
+pub fn asset_record(path: &str, media_type: &str, bytes: &[u8]) -> Result<Value> {
+    ensure!(
+        !path.is_empty()
+            && path.split('/').all(|part| !part.is_empty()
+                && part != "."
+                && part != ".."
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))),
+        "unsafe static asset URL path"
+    );
+    ensure!(
+        !path
+            .split('/')
+            .any(|part| part.starts_with('.') || ["_headers", "_redirects"].contains(&part)),
+        "static asset control/hidden files are not supported"
+    );
+    ensure!(
+        !bytes.is_empty() && bytes.len() <= 25 * 1024 * 1024,
+        "static asset must contain 1 byte to 25 MiB"
+    );
+    ensure!(
+        asset_media_type(path)? == media_type,
+        "static asset MIME does not match its reviewed file type"
+    );
+    Ok(
+        json!({"path":path,"media_type":media_type,"artifact_digest":sha256(bytes),"size_bytes":bytes.len()}),
+    )
+}
+/// 静态资源使用明确审核的真实 MIME；未知格式失败，不伪装成通用二进制。
+/// Use explicitly reviewed real static MIME types; unknown formats fail instead of masquerading as binary.
+pub fn asset_media_type(path: &str) -> Result<&'static str> {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
+    let media = match extension.to_ascii_lowercase().as_str() {
+        "html" => "text/html",
+        "css" => "text/css",
+        "js" | "mjs" => "text/javascript",
+        "map" | "json" => "application/json",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "txt" => "text/plain",
+        "xml" => "application/xml",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "wasm" => "application/wasm",
+        "" if path == "CNAME" => "text/plain",
+        _ => bail!("unsupported static asset MIME; add an explicit reviewed mapping"),
+    };
+    Ok(media)
+}
+/// 将静态资产集合与已登记 manifest 严格绑定。
+/// Bind the complete static asset set to its registered manifest.
+fn validate_asset_manifest(
+    config: &ReleaseConfig,
+    base: &Path,
+    artifacts: &[PreparedArtifact],
+) -> Result<()> {
+    let mut entries = Vec::new();
+    let mut paths = BTreeSet::new();
+    for artifact in artifacts {
+        if let Some(path) = &artifact.asset_path {
+            ensure!(paths.insert(path), "duplicate static asset path");
+            entries.push(asset_record(
+                path,
+                &artifact.declaration.media_type,
+                &artifact.bytes,
+            )?);
+        }
+    }
+    if entries.is_empty() {
+        ensure!(
+            config.asset_manifest.is_none(),
+            "asset manifest declared without assets"
+        );
+        return Ok(());
+    }
+    entries.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+    let manifest_path = within(
+        base,
+        config
+            .asset_manifest
+            .as_deref()
+            .context("static assets require asset_manifest")?,
+    )?;
+    let declaration = artifacts
+        .iter()
+        .find(|a| {
+            a.path == manifest_path
+                && a.declaration.kind == ArtifactKind::Manifest
+                && a.asset_path.is_none()
+        })
+        .context("asset_manifest must be a registered manifest artifact")?;
+    let actual: Value =
+        serde_json::from_slice(&declaration.bytes).context("invalid static asset manifest JSON")?;
+    ensure!(
+        actual == json!({"schema_version":1,"files":entries}),
+        "static asset manifest differs from actual paths/MIME/bytes"
+    );
+    Ok(())
 }
 /// 验证 v3 map 与可复现相对路径。 / Validate v3 maps and reproducible relative source paths.
 fn validate_source_map(bytes: &[u8], name: &str) -> Result<()> {
@@ -444,6 +585,102 @@ fn validate_token(token: &str, config: &ReleaseConfig) -> Result<()> {
     );
     Ok(())
 }
+/// 从环境私钥签发短期机器JWT；公钥参数与唯一受信kid匹配后再签名并自验。
+/// Mint a short-lived machine JWT from an environment key; match public parameters and a unique trusted kid, then sign and self-verify.
+fn mint_machine_token(
+    config: &ReleaseConfig,
+    api_origin: &str,
+    private_pem: &[u8],
+    jwks: &[u8],
+) -> Result<String> {
+    use jsonwebtoken::{
+        Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode, jwk::Jwk,
+    };
+    let issuer = config
+        .status_origin
+        .as_deref()
+        .context("status_origin required to mint machine JWT")?;
+    let origin = secure_url(issuer)?;
+    ensure!(
+        issuer == api_origin,
+        "minted machine JWT issuer must equal MOE_RELEASE_API_URL origin"
+    );
+    ensure!(
+        origin.origin().ascii_serialization() == issuer,
+        "status_origin must be a canonical HTTPS origin without path or trailing slash"
+    );
+    let key = EncodingKey::from_rsa_pem(private_pem)
+        .map_err(|_| anyhow::anyhow!("invalid RSA private-key PEM"))?;
+    let derived = Jwk::from_encoding_key(&key, Algorithm::RS256)
+        .map_err(|_| anyhow::anyhow!("cannot derive RSA public parameters"))?;
+    let public = serde_json::to_value(&derived).context("cannot encode RSA public parameters")?;
+    let modulus = URL_SAFE_NO_PAD
+        .decode(public["n"].as_str().context("RSA modulus missing")?)
+        .context("invalid RSA modulus")?;
+    let modulus_bits = modulus.len() * 8
+        - modulus
+            .first()
+            .context("RSA modulus empty")?
+            .leading_zeros() as usize;
+    ensure!(
+        modulus_bits >= 3072,
+        "release signing key must be at least RSA-3072"
+    );
+    let document: Value = serde_json::from_slice(jwks).context("invalid public machine JWKS")?;
+    let keys = document["keys"]
+        .as_array()
+        .context("public machine JWKS keys missing")?;
+    let mut identifiers = BTreeSet::new();
+    let mut matches = Vec::new();
+    for candidate in keys {
+        let kid = candidate["kid"]
+            .as_str()
+            .filter(|kid| !kid.is_empty())
+            .context("JWKS key requires kid")?;
+        ensure!(identifiers.insert(kid), "JWKS contains duplicate kid");
+        ensure!(
+            ["d", "p", "q", "dp", "dq", "qi"]
+                .iter()
+                .all(|field| candidate.get(*field).is_none()),
+            "machine JWKS must contain public keys only"
+        );
+        if candidate["kty"] == "RSA"
+            && candidate["alg"] == "RS256"
+            && candidate["use"] == "sig"
+            && candidate["n"] == public["n"]
+            && candidate["e"] == public["e"]
+        {
+            matches.push(candidate);
+        }
+    }
+    ensure!(
+        matches.len() == 1,
+        "RSA private key must match exactly one trusted RS256 public JWKS key"
+    );
+    let trusted = matches[0];
+    let now = Utc::now().timestamp();
+    let claims = json!({"iss":issuer,"aud":"moesegfault-status","sub":"status-release","jti":uuid::Uuid::new_v4().to_string(),"iat":now,"exp":now+900,"deployment_id":config.deployment_id,"service_name":config.service_name,"environment":config.environment,"scope":"deployments:write artifacts:write"});
+    let mut header = Header::new(Algorithm::RS256);
+    header.kid = trusted["kid"].as_str().map(str::to_owned);
+    let token = encode(&header, &claims, &key)
+        .map_err(|_| anyhow::anyhow!("machine JWT signing failed"))?;
+    let trusted: Jwk =
+        serde_json::from_value(trusted.clone()).context("invalid trusted public JWK")?;
+    let decoder = DecodingKey::from_jwk(&trusted)
+        .map_err(|_| anyhow::anyhow!("invalid trusted RSA public key"))?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.set_issuer(&[issuer]);
+    validation.set_audience(&["moesegfault-status"]);
+    validation.leeway = 0;
+    let verified = decode::<Value>(&token, &decoder, &validation)
+        .map_err(|_| anyhow::anyhow!("new machine JWT failed pinned-key self-verification"))?;
+    ensure!(
+        verified.claims == claims,
+        "new machine JWT claims changed during signing"
+    );
+    validate_token(&token, config)?;
+    Ok(token)
+}
 /// 注册客户端，不导出或记录 bearer 与预签名 URL。 / Registry client; never exports or logs bearer or presigned URLs.
 struct Registry {
     /// 不重定向的 HTTP 客户端。 / Non-redirecting HTTP client.
@@ -455,12 +692,27 @@ struct Registry {
 }
 impl Registry {
     /// 读取环境秘密。 / Read environment secrets.
-    fn from_env(config: &ReleaseConfig) -> Result<Self> {
+    fn from_env(config: &ReleaseConfig, release_root: &Path) -> Result<Self> {
         let base = secure_url(
             &std::env::var("MOE_RELEASE_API_URL").context("MOE_RELEASE_API_URL required")?,
         )?;
         ensure!(base.query().is_none(), "registry URL cannot contain query");
-        let token = std::env::var("MOE_MACHINE_JWT").context("MOE_MACHINE_JWT required")?;
+        let token = match std::env::var("MOE_MACHINE_JWT") {
+            Ok(token) => token,
+            Err(std::env::VarError::NotPresent) => {
+                let private = std::env::var("MACHINE_JWT_PRIVATE_KEY")
+                    .context("MOE_MACHINE_JWT or MACHINE_JWT_PRIVATE_KEY required")?;
+                let jwks = fs::read(within(release_root, &config.machine_jwks)?)
+                    .context("public machine JWKS unavailable")?;
+                mint_machine_token(
+                    config,
+                    &base.origin().ascii_serialization(),
+                    private.as_bytes(),
+                    &jwks,
+                )?
+            }
+            Err(_) => bail!("MOE_MACHINE_JWT must be UTF-8"),
+        };
         validate_token(&token, config)?;
         let client = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
@@ -657,17 +909,18 @@ struct Snapshot {
     configuration: PathBuf,
     /// 固定工具位置；工具链仍属于受信 runner。 / Pinned tool location; toolchain remains part of the trusted runner.
     cli: PathBuf,
+    /// 可选静态资产快照根。 / Optional frozen static-assets root.
+    assets: Option<PathBuf>,
 }
 impl Snapshot {
     /// 只复制清单内的 runtime/map，保留 import 和 map 的相对目录关系。
     /// Copy only declared runtime/maps while preserving relative import and map layout.
     fn new(config: &ReleaseConfig, base: &Path, artifacts: &[PreparedArtifact]) -> Result<Self> {
         let original_config = within(base, &config.wrangler_config)?;
-        let mut parsed: Value = json5::from_str(&fs::read_to_string(original_config)?)
+        let mut parsed: Value = json5::from_str(&fs::read_to_string(&original_config)?)
             .context("invalid Wrangler JSON/JSONC configuration")?;
         for field in [
             "build",
-            "assets",
             "site",
             "wasm_modules",
             "text_blobs",
@@ -683,6 +936,22 @@ impl Snapshot {
                 "release config contains unsupported build, environment or external-file mechanism: {field}"
             );
         }
+        // 版本发布不能更改域名、DNS、routes 或 triggers；本机初始部署单独管理。
+        // Version releases cannot change domains, DNS, routes or triggers; local bootstrap manages them separately.
+        for field in [
+            "route",
+            "routes",
+            "triggers",
+            "workers_dev",
+            "preview_urls",
+            "zone_id",
+        ] {
+            parsed
+                .as_object_mut()
+                .context("Wrangler config must be an object")?
+                .remove(field);
+        }
+        validate_asset_manifest(config, base, artifacts)?;
         let original_entry = within(base, &config.wrangler_entrypoint)?;
         let original_root = original_entry
             .parent()
@@ -692,10 +961,11 @@ impl Snapshot {
         let runtime = directory.path().join("runtime");
         fs::create_dir(&runtime)?;
         for artifact in artifacts.iter().filter(|a| {
-            matches!(
-                a.declaration.kind,
-                ArtifactKind::Binary | ArtifactKind::Other | ArtifactKind::SourceMap
-            )
+            a.asset_path.is_none()
+                && matches!(
+                    a.declaration.kind,
+                    ArtifactKind::Binary | ArtifactKind::Other | ArtifactKind::SourceMap
+                )
         }) {
             let relative = artifact
                 .path
@@ -709,6 +979,7 @@ impl Snapshot {
             )?;
             fs::write(destination, &artifact.bytes)?;
         }
+        let assets = freeze_assets(&mut parsed, &original_config, directory.path(), artifacts)?;
         let entry = runtime.join(
             original_entry
                 .file_name()
@@ -724,8 +995,121 @@ impl Snapshot {
             entry,
             configuration,
             cli: within(base, &config.wrangler_cli)?,
+            assets,
         })
     }
+}
+
+/// 只接受已登记的 SPA 资产策略，并把整个集合复制到独立快照。
+/// Accept only the registered SPA asset policy and copy the complete set into an isolated snapshot.
+fn freeze_assets(
+    parsed: &mut Value,
+    original_config: &Path,
+    snapshot: &Path,
+    artifacts: &[PreparedArtifact],
+) -> Result<Option<PathBuf>> {
+    let static_files: Vec<_> = artifacts
+        .iter()
+        .filter(|a| a.asset_path.is_some())
+        .collect();
+    if static_files.is_empty() {
+        ensure!(
+            parsed.get("assets").is_none(),
+            "assets config requires registered static assets"
+        );
+        return Ok(None);
+    }
+    let policy = parsed["assets"]
+        .as_object()
+        .context("static assets require explicit Wrangler assets policy")?;
+    ensure!(
+        policy.keys().all(
+            |key| ["directory", "not_found_handling", "run_worker_first"].contains(&key.as_str())
+        ),
+        "unsupported static assets policy option"
+    );
+    ensure!(
+        parsed["assets"]["not_found_handling"] == "single-page-application"
+            && parsed["assets"]["run_worker_first"] == json!(["/api/*"]),
+        "static assets require SPA handling and /api/* Worker-first isolation"
+    );
+    let original_root = fs::canonicalize(
+        original_config
+            .parent()
+            .context("config parent missing")?
+            .join(
+                parsed["assets"]["directory"]
+                    .as_str()
+                    .context("assets.directory missing")?,
+            ),
+    )?;
+    let assets = snapshot.join("assets");
+    fs::create_dir(&assets)?;
+    let mut expected = BTreeSet::new();
+    for artifact in static_files {
+        let path = artifact.asset_path.as_ref().unwrap();
+        ensure!(
+            fs::canonicalize(original_root.join(path))? == artifact.path,
+            "static asset declaration does not match configured directory"
+        );
+        expected.insert(path.clone());
+        let destination = assets.join(path);
+        fs::create_dir_all(destination.parent().context("asset parent missing")?)?;
+        fs::write(destination, &artifact.bytes)?;
+    }
+    ensure!(
+        static_files_in(&original_root)? == expected,
+        "configured static directory contains missing or unregistered files"
+    );
+    parsed["assets"]["directory"] = json!(assets);
+    Ok(Some(assets))
+}
+/// 枚举静态目录，拒绝符号链接和非普通文件，避免逃逸与未审计控制文件。
+/// Enumerate a static directory, rejecting symlinks and non-files to prevent escape and unaudited control files.
+pub fn static_files_in(root: &Path) -> Result<BTreeSet<String>> {
+    fn walk(root: &Path, directory: &Path, files: &mut BTreeSet<String>) -> Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let kind = entry.file_type()?;
+            ensure!(!kind.is_symlink(), "static assets cannot contain symlinks");
+            if kind.is_dir() {
+                walk(root, &entry.path(), files)?;
+                continue;
+            }
+            ensure!(kind.is_file(), "static asset must be a regular file");
+            let path = entry
+                .path()
+                .strip_prefix(root)?
+                .to_str()
+                .context("static path must be UTF-8")?
+                .replace('\\', "/");
+            files.insert(path);
+        }
+        Ok(())
+    }
+    let mut files = BTreeSet::new();
+    walk(root, root, &mut files)?;
+    Ok(files)
+}
+/// 对私有静态目录进行集合与逐字节复查；不声称 dry-run 等于云上传。
+/// Recheck the private static directory's set and exact bytes; dry-run is not claimed as cloud upload.
+fn audit_assets(snapshot: &Snapshot, artifacts: &[PreparedArtifact]) -> Result<()> {
+    if let Some(root) = &snapshot.assets {
+        let mut expected = BTreeSet::new();
+        for artifact in artifacts.iter().filter(|a| a.asset_path.is_some()) {
+            let path = artifact.asset_path.as_ref().unwrap();
+            expected.insert(path.clone());
+            ensure!(
+                fs::read(root.join(path))? == artifact.bytes,
+                "frozen static asset changed"
+            );
+        }
+        ensure!(
+            static_files_in(root)? == expected,
+            "frozen static asset set changed"
+        );
+    }
+    Ok(())
 }
 /// 构造不经过 shell 的 Wrangler 参数，仅使用同一冻结快照。
 /// Construct shell-free Wrangler arguments using only the same frozen snapshot.
@@ -735,12 +1119,12 @@ fn wrangler(
     manifest: &Value,
     artifacts: &[PreparedArtifact],
     dry_run: bool,
-    bootstrap: bool,
 ) -> Result<()> {
+    audit_assets(snapshot, artifacts)?;
     let mut command = Command::new("node");
     command
         .arg(&snapshot.cli)
-        .arg("deploy")
+        .args(["versions", "upload"])
         .arg(&snapshot.entry)
         .args([
             "--no-bundle",
@@ -758,11 +1142,12 @@ fn wrangler(
         ),
         ("STATUS_VERSION", config.service_version.as_str()),
         ("ENVIRONMENT", manifest["environment"].as_str().unwrap()),
-        ("BOOTSTRAP_MODE", if bootstrap { "true" } else { "false" }),
+        ("BOOTSTRAP_MODE", "false"),
     ] {
         command.arg("--var").arg(format!("{key}:{value}"));
     }
     let output_dir = tempfile::tempdir().context("cannot create bundle audit directory")?;
+    let receipt = tempfile::NamedTempFile::new_in(snapshot.directory.path())?.into_temp_path();
     if dry_run {
         command
             .arg("--dry-run")
@@ -773,7 +1158,9 @@ fn wrangler(
         .current_dir(snapshot.directory.path())
         .env_remove("CLOUDFLARE_ENV")
         .env_remove("MOE_MACHINE_JWT")
-        .env_remove("MOE_BOOTSTRAP_ACK");
+        .env_remove("MACHINE_JWT_PRIVATE_KEY")
+        .env_remove("MOE_BOOTSTRAP_ACK")
+        .env("WRANGLER_OUTPUT_FILE_PATH", receipt.as_os_str());
     // 子进程日志可能带平台秘密，因此只报告退出状态。 / Child logs can contain platform secrets; report exit status only.
     let result = command.output().context("Wrangler failed to start")?;
     ensure!(
@@ -781,34 +1168,92 @@ fn wrangler(
         "Wrangler failed; child output suppressed to protect secrets"
     );
     if dry_run {
+        audit_assets(snapshot, artifacts)?;
         let mut seen = BTreeSet::new();
         audit_bundle(output_dir.path(), artifacts, &mut seen)?;
         for artifact in artifacts.iter().filter(|a| {
-            matches!(
-                a.declaration.kind,
-                ArtifactKind::Binary | ArtifactKind::Other
-            )
+            a.asset_path.is_none()
+                && matches!(
+                    a.declaration.kind,
+                    ArtifactKind::Binary | ArtifactKind::Other
+                )
         }) {
             ensure!(
                 seen.contains(&artifact.declaration.file_name),
                 "declared runtime missing from Wrangler output"
             );
         }
+    } else {
+        let version = uploaded_version(
+            &fs::read_to_string(&receipt).context("Wrangler upload receipt missing")?,
+        )?;
+        deploy_version(snapshot, &version)?;
     }
     Ok(())
 }
-/// 执行完整发布，或显式只启动拒绝业务的 bootstrap 注册器。
-/// Perform a complete release, or explicitly bootstrap a registry which rejects business traffic.
-///
-/// `--bootstrap-only` 之后必须重新运行正常发布完成 ready；不自动激活。
-/// After `--bootstrap-only`, rerun normal release to reach ready; activation is never automatic.
+
+/// 只使用这次上传的结构化 receipt，不解析日志或查询可能竞争的 latest version。
+/// Use only this upload's structured receipt, never logs or a racing latest-version lookup.
+fn uploaded_version(receipt: &str) -> Result<String> {
+    let mut versions = Vec::new();
+    for line in receipt.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line).context("invalid Wrangler output receipt")?;
+        if value["type"] != "version-upload" {
+            continue;
+        }
+        let id = value["version_id"]
+            .as_str()
+            .context("Wrangler upload receipt lacks version_id")?;
+        ensure!(
+            id.len() == 36
+                && id
+                    .chars()
+                    .enumerate()
+                    .all(|(index, c)| if [8, 13, 18, 23].contains(&index) {
+                        c == '-'
+                    } else {
+                        c.is_ascii_hexdigit()
+                    }),
+            "invalid uploaded version identifier"
+        );
+        versions.push(id.to_owned());
+    }
+    ensure!(
+        versions.len() == 1,
+        "expected exactly one uploaded version receipt"
+    );
+    Ok(versions.remove(0))
+}
+/// 100% 切换到已上传版本；绝不调用 routes/domain/DNS/triggers API。
+/// Switch 100% to the uploaded version; never invoke routes/domain/DNS/triggers APIs.
+fn deploy_version(snapshot: &Snapshot, version: &str) -> Result<()> {
+    let result = Command::new("node")
+        .arg(&snapshot.cli)
+        .args(["versions", "deploy"])
+        .arg(format!("{version}@100%"))
+        .args(["--yes", "--config"])
+        .arg(&snapshot.configuration)
+        .current_dir(snapshot.directory.path())
+        .env_remove("CLOUDFLARE_ENV")
+        .env_remove("MOE_MACHINE_JWT")
+        .env_remove("MACHINE_JWT_PRIVATE_KEY")
+        .env_remove("MOE_BOOTSTRAP_ACK")
+        .output()
+        .context("Wrangler version deploy failed to start")?;
+    ensure!(
+        result.status.success(),
+        "Wrangler version deploy failed (output suppressed)"
+    );
+    Ok(())
+}
+/// 执行带 ready 门禁的纯版本发布；首次引导与 DNS 只允许独立本机 CLI 操作。
+/// Perform readiness-gated version-only release; initial bootstrap and DNS belong to separate local CLI operations.
 pub fn release(
     config: &ReleaseConfig,
     base: &Path,
     artifacts: &[PreparedArtifact],
     manifest: &Value,
     dry_run: bool,
-    bootstrap: bool,
 ) -> Result<()> {
     ensure!(
         self::manifest(config, base, artifacts)? == *manifest,
@@ -817,7 +1262,7 @@ pub fn release(
     unchanged(artifacts)?;
     let snapshot = Snapshot::new(config, base, artifacts)?;
     // 本地预检也必须发生在网络注册之前。 / Local preflight must also precede registry writes.
-    wrangler(config, &snapshot, manifest, artifacts, true, bootstrap)?;
+    wrangler(config, &snapshot, manifest, artifacts, true)?;
     if dry_run {
         println!("local Wrangler dry-run passed; no registry or deployment writes");
         return Ok(());
@@ -826,27 +1271,11 @@ pub fn release(
         std::env::var("CLOUDFLARE_API_TOKEN").is_ok_and(|token| token.len() >= 16),
         "CLOUDFLARE_API_TOKEN environment secret required for deployment"
     );
-    if bootstrap {
-        ensure!(
-            std::env::var("MOE_BOOTSTRAP_ACK").ok().as_deref()
-                == Some("I_ACKNOWLEDGE_FIRST_DEPLOYMENT_ONLY"),
-            "bootstrap requires MOE_BOOTSTRAP_ACK=I_ACKNOWLEDGE_FIRST_DEPLOYMENT_ONLY"
-        );
-        ensure!(
-            config.service_name == "status",
-            "bootstrap is restricted to the status registry service"
-        );
-        wrangler(config, &snapshot, manifest, artifacts, false, true)?;
-        println!(
-            "bootstrap registry deployed with business traffic disabled; provision secrets then run normal release"
-        );
-        return Ok(());
-    }
-    let registry = Registry::from_env(config)?;
+    let registry = Registry::from_env(config, base)?;
     registry.register(config, manifest, artifacts)?;
-    wrangler(config, &snapshot, manifest, artifacts, false, false)?;
+    wrangler(config, &snapshot, manifest, artifacts, false)?;
     println!(
-        "deployment completed after ready gate; Access admin activation remains pending smoke/canary approval"
+        "deployment completed after ready gate; authenticated administrator activation remains pending smoke/canary approval"
     );
     Ok(())
 }
@@ -971,7 +1400,7 @@ mod tests {
         )
         .unwrap();
         fs::write(dir.path().join("worker.js"), "mutated workspace").unwrap();
-        wrangler(&config, &snapshot, &manifest, &artifacts, true, false).unwrap();
+        wrangler(&config, &snapshot, &manifest, &artifacts, true).unwrap();
     }
 
     /// 可复用的无秘密配置。 / Reusable secret-free configuration.
@@ -1058,6 +1487,126 @@ mod tests {
             serde_json::from_slice(&fs::read(&snapshot.configuration).unwrap()).unwrap();
         assert!(frozen.get("assets").is_none());
     }
+    /// 添加真实静态文件与路径清单的 fixture。 / Add real static files and their path manifest to a fixture.
+    fn static_fixture(config: &mut ReleaseConfig, root: &Path) {
+        fs::create_dir(root.join("site")).unwrap();
+        fs::write(
+            root.join("site/index.html"),
+            "<!doctype html><title>Ops</title>",
+        )
+        .unwrap();
+        fs::write(root.join("site/style.css"), "body { color: pink; }").unwrap();
+        let mut records = Vec::new();
+        for (path, media) in [("index.html", "text/html"), ("style.css", "text/css")] {
+            let bytes = fs::read(root.join("site").join(path)).unwrap();
+            records.push(asset_record(path, media, &bytes).unwrap());
+            config.artifacts.push(serde_json::from_value(json!({"path":format!("site/{path}"),"kind":"other","media_type":media,"asset_path":path})).unwrap());
+        }
+        fs::write(
+            root.join("assets-manifest.json"),
+            canonical(&json!({"schema_version":1,"files":records})),
+        )
+        .unwrap();
+        config.artifacts.push(serde_json::from_value(json!({"path":"assets-manifest.json","kind":"manifest","media_type":"application/json"})).unwrap());
+        config.asset_manifest = Some("assets-manifest.json".into());
+        fs::write(root.join("wrangler.jsonc"), r#"{"name":"static-snapshot-test","assets":{"directory":"site","not_found_handling":"single-page-application","run_worker_first":["/api/*"]},"routes":[{"pattern":"never-change.example","custom_domain":true}],"triggers":{"crons":["* * * * *"]},"workers_dev":false,"preview_urls":false,"compatibility_date":"2026-09-12"}"#).unwrap();
+    }
+    #[test]
+    fn static_snapshots_bind_path_mime_and_bytes_without_module_injection() {
+        let (dir, mut config, _) = fixture();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        config.wrangler_cli = "wrangler.js".into();
+        fs::write(root.join("wrangler.js"), "unused").unwrap();
+        static_fixture(&mut config, &root);
+        let artifacts = prepare(&config, &root).unwrap();
+        let snapshot = Snapshot::new(&config, &root, &artifacts).unwrap();
+        let frozen: Value =
+            serde_json::from_slice(&fs::read(&snapshot.configuration).unwrap()).unwrap();
+        for key in ["routes", "route", "triggers", "workers_dev", "preview_urls"] {
+            assert!(frozen.get(key).is_none());
+        }
+        assert!(!snapshot.entry.parent().unwrap().join("index.html").exists());
+        fs::write(root.join("site/extra.js"), "unregistered").unwrap();
+        assert!(Snapshot::new(&config, &root, &artifacts).is_err());
+        fs::write(root.join("site/index.html"), "modified").unwrap();
+        audit_assets(&snapshot, &artifacts).unwrap();
+        assert!(prepare(&config, &root).is_err());
+        fs::write(
+            snapshot.assets.as_ref().unwrap().join("extra.js"),
+            "injected",
+        )
+        .unwrap();
+        assert!(audit_assets(&snapshot, &artifacts).is_err());
+        assert!(asset_record("../escape.js", "text/javascript", b"x").is_err());
+        assert!(asset_record(".assetsignore", "text/plain", b"x").is_err());
+        assert!(asset_record("_redirects", "text/plain", b"x").is_err());
+    }
+    #[test]
+    fn version_receipts_reject_missing_ambiguous_or_argument_shaped_ids() {
+        let valid =
+            r#"{"type":"version-upload","version_id":"01234567-89ab-cdef-0123-456789abcdef"}"#;
+        assert_eq!(
+            uploaded_version(valid).unwrap(),
+            "01234567-89ab-cdef-0123-456789abcdef"
+        );
+        assert!(uploaded_version("").is_err());
+        assert!(uploaded_version(&format!("{valid}\n{valid}")).is_err());
+        assert!(
+            uploaded_version(r#"{"type":"version-upload","version_id":"--name=other"}"#).is_err()
+        );
+    }
+    /// 真实子进程夹具验证只执行 upload/100% deploy，不调用完整 deploy 或 DNS 命令。
+    /// A real subprocess fixture verifies upload/100% deploy only, never full deploy or DNS commands.
+    #[test]
+    #[ignore = "requires Node"]
+    fn subprocess_release_uses_only_versions_and_exact_upload_receipt() {
+        let (dir, mut config, artifacts) = fixture();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        config.wrangler_cli = "wrangler.js".into();
+        fs::write(root.join("wrangler.jsonc"), "{}").unwrap();
+        fs::write(root.join("wrangler.js"), r#"
+const fs = require('node:fs');
+const path = require('node:path');
+const args = process.argv.slice(2);
+fs.appendFileSync(path.join(__dirname, 'calls.jsonl'), JSON.stringify(args) + '\n');
+if (args[0] !== 'versions') process.exit(9);
+if (args[1] === 'upload') fs.appendFileSync(process.env.WRANGLER_OUTPUT_FILE_PATH, JSON.stringify({type: 'version-upload', version_id: '01234567-89ab-cdef-0123-456789abcdef'}) + '\n');
+"#).unwrap();
+        let snapshot = Snapshot::new(&config, &root, &artifacts).unwrap();
+        let manifest = json!({"deployment_id":config.deployment_id,"git_commit":"0123456789abcdef0123456789abcdef01234567","artifact_digest":artifacts[0].declaration.artifact_digest,"environment":"production"});
+        wrangler(&config, &snapshot, &manifest, &artifacts, false).unwrap();
+        let calls: Vec<Value> = fs::read_to_string(root.join("calls.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0][0], "versions");
+        assert_eq!(calls[0][1], "upload");
+        assert_eq!(calls[1][0], "versions");
+        assert_eq!(calls[1][1], "deploy");
+        assert_eq!(calls[1][2], "01234567-89ab-cdef-0123-456789abcdef@100%");
+    }
+    /// 真实 Wrangler 版本 dry-run 加载静态快照，不进行上传或 DNS 操作。
+    /// Actual Wrangler versions dry-run loads static snapshots without uploads or DNS operations.
+    #[test]
+    #[ignore = "requires installed Wrangler"]
+    fn real_wrangler_versions_static_snapshot_dry_run() {
+        let repo = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
+        let (dir, mut config, _) = fixture();
+        let root = fs::canonicalize(dir.path()).unwrap();
+        static_fixture(&mut config, &root);
+        let artifacts = prepare(&config, &root).unwrap();
+        // snapshot factory constrains CLI location, then test substitutes the already-installed trusted tool.
+        // 快照构造限制CLI路径；测试随后替换为已经安装的受信工具。
+        config.wrangler_cli = "wrangler.js".into();
+        fs::write(root.join("wrangler.js"), "unused").unwrap();
+        let mut snapshot = Snapshot::new(&config, &root, &artifacts).unwrap();
+        snapshot.cli = repo.join("node_modules/wrangler/bin/wrangler.js");
+        fs::write(root.join("site/extra.js"), "unregistered workspace file").unwrap();
+        let manifest = json!({"deployment_id":config.deployment_id,"git_commit":"0123456789abcdef0123456789abcdef01234567","artifact_digest":artifacts[0].declaration.artifact_digest,"environment":"production"});
+        wrangler(&config, &snapshot, &manifest, &artifacts, true).unwrap();
+    }
     #[test]
     fn wasm_split_preserves_code_and_non_debug_custom_sections() {
         let mut bytes = b"\0asm\x01\0\0\0".to_vec();
@@ -1093,6 +1642,76 @@ mod tests {
         claims["exp"] = json!(now + 899);
         claims["service_name"] = json!("wrong");
         assert!(validate_token(&token(&claims), &config).is_err());
+    }
+    /// 仅在内存中生成测试RSA密钥，验证pinning、kid、claims和错误origin；不打印令牌。
+    /// Generate an in-memory test RSA key and verify pinning, kid, claims and wrong-origin rejection without printing tokens.
+    #[test]
+    #[ignore = "requires Node to generate an ephemeral RSA-3072 test key"]
+    fn native_mint_requires_matching_public_key_and_pinned_origin() {
+        let result = Command::new("node").args(["-e", "const c=require('node:crypto');const k=c.generateKeyPairSync('rsa',{modulusLength:3072});process.stdout.write(JSON.stringify({private:k.privateKey.export({type:'pkcs8',format:'pem'}),public:{...k.publicKey.export({format:'jwk'}),kid:'test-kid',alg:'RS256',use:'sig'}}))"]).output().unwrap();
+        assert!(result.status.success());
+        let fixture: Value = serde_json::from_slice(&result.stdout).unwrap();
+        let private = fixture["private"].as_str().unwrap();
+        let mut document = json!({"keys":[fixture["public"].clone()]});
+        let mut config = config();
+        config.status_origin = Some("https://status.example".into());
+        let token = mint_machine_token(
+            &config,
+            "https://status.example",
+            private.as_bytes(),
+            &serde_json::to_vec(&document).unwrap(),
+        )
+        .unwrap();
+        let header = jsonwebtoken::decode_header(&token).unwrap();
+        assert_eq!(header.kid.as_deref(), Some("test-kid"));
+        assert_eq!(header.alg, jsonwebtoken::Algorithm::RS256);
+        let claims: Value = serde_json::from_slice(
+            &URL_SAFE_NO_PAD
+                .decode(token.split('.').nth(1).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(claims["iss"], "https://status.example");
+        assert_eq!(claims["aud"], "moesegfault-status");
+        assert_eq!(claims["scope"], "deployments:write artifacts:write");
+        assert_eq!(
+            claims["exp"].as_i64().unwrap() - claims["iat"].as_i64().unwrap(),
+            900
+        );
+        assert!(uuid::Uuid::parse_str(claims["jti"].as_str().unwrap()).is_ok());
+        assert!(
+            mint_machine_token(
+                &config,
+                "https://wrong.example",
+                private.as_bytes(),
+                &serde_json::to_vec(&document).unwrap()
+            )
+            .is_err()
+        );
+        document["keys"]
+            .as_array_mut()
+            .unwrap()
+            .push(fixture["public"].clone());
+        assert!(
+            mint_machine_token(
+                &config,
+                "https://status.example",
+                private.as_bytes(),
+                &serde_json::to_vec(&document).unwrap()
+            )
+            .is_err()
+        );
+        document["keys"].as_array_mut().unwrap().pop();
+        document["keys"][0]["n"] = json!("mismatching-public-key");
+        assert!(
+            mint_machine_token(
+                &config,
+                "https://status.example",
+                private.as_bytes(),
+                &serde_json::to_vec(&document).unwrap()
+            )
+            .is_err()
+        );
     }
     /// 单连接 HTTPS 测试服务器，完整读取 HTTP body。 / One-request HTTPS test server reading the full HTTP body.
     fn read_request(stream: &mut impl Read) -> (String, Vec<u8>) {

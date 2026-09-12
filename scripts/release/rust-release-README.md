@@ -1,103 +1,110 @@
-# Rust 发布编排 / Rust release orchestration
+# Rust 发布与来源证明 / Rust release and provenance
 
-`status-release` 是发布事务唯一业务实现。Node 仅运行平台官方 Wrangler；不执行 TypeScript 发布业务。
-`status-release` owns the release transaction. Node runs only the official Wrangler platform tool, not TypeScript release logic.
+`status-release` 负责发布事务；Node 只运行官方 Wrangler。GitHub 只发布已有 Worker 的版本，不管理 DNS、域名、routes 或 triggers。首次引导与 Custom Domain 由操作者在本机 CLI 独立完成；已删除 `--bootstrap-only`，发布器没有绕过 ready 的入口。
+`status-release` owns the release transaction; Node runs only official Wrangler. GitHub publishes versions of existing Workers and never manages DNS, domains, routes or triggers. Initial bootstrap and Custom Domains are separate local operator CLI tasks. `--bootstrap-only` was removed: the releaser has no readiness bypass.
 
 ## 用法 / Usage
 
-发布配置应位于仓库根；所有文件包括 Wrangler JS 都必须在配置目录内，符号链接不能逃逸。
-Place the release configuration at the repository root. All files, including Wrangler JS, must remain beneath that directory after symlink resolution.
-
 ```sh
-# 无网络；严格校验干净 Git、CI 来源、真实文件和符号。 / Offline provenance validation.
-cargo run --locked -p status-release -- --config release.production.json --verify-only
-# 真正运行 Wrangler 本地 dry-run，并逐字节检查上传模块。 / Actual local Wrangler dry-run with byte-for-byte module audit.
-cargo run --locked -p status-release -- --config release.production.json --dry-run
-# 受保护的 GitHub Environment 审批后运行；秘密由环境注入。 / Run after protected GitHub Environment approval with injected secrets.
-cargo run --locked -p status-release -- --config release.production.json
+# 先编译 Vite，再冻结其路径/MIME/字节清单。 / Build Vite before freezing its path/MIME/byte inventory.
+pnpm --filter @moesegfault/ops build
+cargo run --locked -p status-build -- --service all
+# 每个服务使用独立 deployment_id 和冻结的 metadata。 / Use independent deployment IDs and frozen metadata per service.
+cargo run --locked -p status-build -- --service ops --release-template release-metadata.json
+
+# 不联网、不读取签名私钥。 / No network or signing-key access.
+cargo run --locked -p status-release -- --config release.ops.json --verify-only
+# 真正 Wrangler versions upload dry-run；不上传、不部署。 / Actual Wrangler versions upload dry-run; no upload or deployment.
+cargo run --locked -p status-release -- --config release.ops.json --dry-run
+# 受审批发布 runner。 / Approved release runner.
+cargo run --locked -p status-release -- --config release.ops.json
 ```
 
-必需秘密：`MOE_MACHINE_JWT`、`CLOUDFLARE_API_TOKEN`；平台账户可由 `CLOUDFLARE_ACCOUNT_ID` 提供。`MOE_RELEASE_API_URL` 必须为无用户名、密码、fragment/query 的 HTTPS URL。
-Required secrets: `MOE_MACHINE_JWT`, `CLOUDFLARE_API_TOKEN`; `CLOUDFLARE_ACCOUNT_ID` can supply the platform account. `MOE_RELEASE_API_URL` must be credential-free HTTPS without fragment/query.
+配置文件放在仓库根，所有产物、公共 JWKS 和 Wrangler 工具入口必须位于该目录内，symlink 不能逃逸。已有冻结 release 配置不会被构建器以不同 metadata 覆写。
+Keep configuration at the repository root. Artifacts, public JWKS and the Wrangler entrypoint must remain beneath it after symlink resolution. The builder refuses to overwrite a frozen release configuration with different metadata.
 
-JWT 预检查 deployment/service/environment、两个 write scope、最多 15 分钟寿命、至少 10 分钟剩余有效期；**客户端预检查不是验签**，注册器仍负责验签、issuer/audience、授权及时间校验。
-JWT preflight checks deployment/service/environment, both write scopes, a maximum 15-minute lifetime and over 10 minutes remaining. **Client preflight does not verify signatures**: the registry remains responsible for signature, issuer/audience, authorization and time validation.
+## 凭据与原生 JWT 签发 / Credentials and native JWT minting
 
-## 事务与失败语义 / Transaction and failure semantics
+真实发布必需 `CLOUDFLARE_API_TOKEN` 与 HTTPS `MOE_RELEASE_API_URL`。机器凭据二选一：
+Real release requires `CLOUDFLARE_API_TOKEN` and HTTPS `MOE_RELEASE_API_URL`. Choose one machine credential:
+
+1. `MOE_MACHINE_JWT`：使用已签发令牌，预检查 deployment/service/environment、两个 write scope、最多 15 分钟寿命及至少 10 分钟剩余有效期；服务端仍负责验签。
+   `MOE_MACHINE_JWT`: use a pre-issued token, prechecking deployment/service/environment, both write scopes, a maximum 15-minute lifetime and over 10 minutes remaining. The server still verifies signatures.
+2. 否则从 `MACHINE_JWT_PRIVATE_KEY` 读取 RSA PEM，只在内存内签发。配置需显式提供 `status_origin`，默认公共 JWKS 为 `config/machine-jwks.json`，可用 `machine_jwks` 指定仓库内路径。
+   Otherwise read an RSA PEM from `MACHINE_JWT_PRIVATE_KEY` and mint only in memory. Configuration must explicitly set `status_origin`; public JWKS defaults to `config/machine-jwks.json`, overridable with a repository-local `machine_jwks` path.
+
+```json
+{
+  "status_origin": "https://status.moesegfault.dev",
+  "machine_jwks": "config/machine-jwks.json"
+}
+```
+
+这些字段追加到常规 release metadata，不是完整配置示例。签发前要求 `status_origin` 为无路径/尾斜杠的规范 HTTPS origin，且与 `MOE_RELEASE_API_URL` origin 严格一致。私钥导出的 RSA n/e 必须匹配公共 JWKS 中唯一的 RS256/sig kid；拒绝重复 kid、含私钥成员的 JWKS、不匹配密钥与小于 RSA-3072 的 modulus。签名后用固定公共密钥再次验签。固定 audience 为 `moesegfault-status`，subject 为 `status-release`，权限仅 `deployments:write artifacts:write`，携带配置 deployment/service/environment、随机 UUID jti、当前 iat 与 `exp=iat+900`。
+These fields extend normal release metadata and are not a complete configuration. Minting requires a canonical HTTPS `status_origin` without a path/trailing slash, exactly matching the API origin. RSA n/e derived from the private key must match exactly one RS256/sig kid in the public JWKS. Duplicate kids, private JWK members, mismatched keys and moduli below RSA-3072 are rejected. The signed token is self-verified against the pinned public key. Audience is `moesegfault-status`, subject is `status-release`, scopes are only `deployments:write artifacts:write`, with configured deployment/service/environment, a random UUID jti, current iat and `exp=iat+900`.
+
+令牌与私钥不打印、不写文件、不传给 Wrangler 或 esbuild/worker-build。网络错误体、预签名 URL 和 Wrangler stdout/stderr 不输出；只报告安全阶段与 HTTP 状态。公共密钥文件不包含秘密。
+Tokens/private keys are never printed, written to files or passed to Wrangler/esbuild/worker-build. Network error bodies, presigned URLs and Wrangler stdout/stderr are suppressed; only safe phase/status information is reported. Public key files contain no secrets.
+
+## 固定事务 / Fixed transaction
 
 ```text
-clean Git/CI + exact bytes + JS map/Wasm DWARF matching
-    -> Wrangler local dry-run -> compare actual output bytes
-    -> PUT immutable manifest
-    -> for each artifact: session -> If-None-Match PUT -> server-verified commit
-    -> PUT manifest -> require ready
-    -> deploy from the same private frozen runtime/config snapshot
-    -> Wrangler deploy --no-bundle --upload-source-maps --strict
-    -> smoke/canary + explicit Access admin activation (separate approval)
+clean Git + CI identity + exact SHA-256/MD5 + maps/DWARF + static manifest
+  -> private runtime/config/assets snapshot
+  -> versions upload --dry-run + runtime byte audit + static set/byte audit
+  -> immutable manifest registration
+  -> each artifact: scoped session -> immutable PUT -> server-verified commit
+  -> require recomputed ready
+  -> versions upload --no-bundle --upload-source-maps --strict
+  -> unique version_id from this invocation's structured JSONL receipt
+  -> versions deploy <exact-version-id>@100% --yes
+  -> smoke/canary -> separate authenticated administrator activation
 ```
 
-- 上传 SHA-256 是真实内容摘要；MD5 是真实字节的 Base64 传输校验，不用来承担安全哈希职责。
-  Upload SHA-256 identifies actual bytes; Base64 MD5 is only a transport checksum, not a security hash.
-- 预签名上传不带 machine JWT；禁止 HTTP 重定向、URL 内凭据、过期 session、不匹配的 content length/MD5/metadata，以及缺失 `If-None-Match: *`。
-  Presigned uploads never carry the machine JWT. Redirects, URL credentials, expired sessions, mismatched length/MD5/metadata and absent `If-None-Match: *` are rejected.
-- PUT 的 412 仅允许进入服务端 commit 检查，不当作上传成功证据。同 attempt 重试复用幂等 key；session 过期后才递增 `release_attempt`。CLI 不盲目自动重试。
-  PUT 412 only permits server-side commit verification; it is not upload-success evidence. Reuse attempt/idempotency keys on retry; increment `release_attempt` only after expiry. No blind automatic retry.
-- 最后 ready 检查失败不会部署；部署失败不会激活；部署成功也不会用 machine JWT 冒充 Access admin 激活。遵循 `docs/operations.md` 的带 revision/CSRF/Origin 的 admin cut-over。
-  Failed readiness prevents deployment; failed deployment prevents activation; successful deployment never impersonates an Access admin with a machine JWT. Follow the revision/CSRF/Origin-bound admin cut-over in `docs/operations.md`.
-- Wrangler 配置不得含 `build` 节，以免注册后重建。入口和所有运行模块必须已经构建，dry-run 输出每个模块必须能在 artifact 清单中逐字节找到。
-  Wrangler configuration must not contain `build`, preventing rebuilding after registration. The entrypoint and all runtime modules must be prebuilt, and every dry-run module must byte-match a declaration.
-- CLI 不打印 bearer、预签名 URL、服务器错误体或 Wrangler 子进程输出（可能含秘密）；失败仅提供阶段和 HTTP 状态。
-  The CLI never prints bearers, presigned URLs, server error bodies or potentially secret-bearing Wrangler output; failures expose only phase/status.
+上传 SHA-256 来自真实字节；Base64 MD5 只用于传输校验。预签名请求不带 machine bearer，拒绝重定向、不匹配 headers 与过期 session，并要求 `If-None-Match: *`。PUT 412 只允许继续服务端 digest commit 验证。同 attempt 重试复用幂等 key；会话过期后才递增 `release_attempt`。ready 失败不执行云版本上传；上传失败/receipt 缺失、多个或非法不切换流量。发布不查询可能竞争的 latest version。
+SHA-256 hashes actual bytes; Base64 MD5 is only a transport check. Presigned requests never carry machine bearers; redirects, mismatched headers and expired sessions are rejected, and `If-None-Match: *` is required. PUT 412 only permits server-side digest commit verification. Reuse idempotency keys within an attempt; increment the attempt after session expiry. Failed readiness prevents cloud version upload; failed uploads or missing/ambiguous/invalid receipts prevent traffic cut-over. Never query a racing latest version.
 
-## 首次双阶段引导 / First-deployment two-stage bootstrap
+快照移除 `route`、`routes`、`triggers`、`workers_dev`、`preview_urls`、`zone_id`；工具仅调用 `versions upload` 和 `versions deploy`，不调用完整 `deploy`、`triggers deploy` 或 DNS/domain 命令。100% 版本切换不意味着业务 current-deployment 指针已经激活；后者仍需独立管理员审批。
+Snapshots remove `route`, `routes`, `triggers`, `workers_dev`, `preview_urls`, and `zone_id`. The tool invokes only `versions upload` and `versions deploy`, never full `deploy`, `triggers deploy`, or DNS/domain commands. A 100% version cut-over does not activate the application's current-deployment pointer; that remains a separately approved administrator action.
 
-1. 人工完成 R2 开通、D1 迁移和最小权限配置；工具不会开通计费或自动创建这些资源。
-   Manually provision R2, apply D1 migrations and configure least privilege; this tool does not enable billing or create these resources.
-2. 仅首次注册器部署，在受审批环境设置 `MOE_BOOTSTRAP_ACK=I_ACKNOWLEDGE_FIRST_DEPLOYMENT_ONLY`，运行 `--bootstrap-only`。部署 `BOOTSTRAP_MODE:true`，业务入口保持不可用，注册 API 仍需正常 JWT 鉴权。
-   For the first registry deployment only, set `MOE_BOOTSTRAP_ACK=I_ACKNOWLEDGE_FIRST_DEPLOYMENT_ONLY` in an approved environment and run `--bootstrap-only`. `BOOTSTRAP_MODE:true` keeps business endpoints unavailable while registry APIs still require normal JWT authentication.
-3. 配置验证密钥、R2 上传签名秘密和短期发布 JWT，使用同一冻结配置执行普通发布。只有上传、commit、ready 全部成功，才部署 `BOOTSTRAP_MODE:false`。
-   Provision verification keys, R2 signing secrets and a short-lived release JWT, then run normal release with the same frozen configuration. Only successful uploads, commits and readiness permit deployment with `BOOTSTRAP_MODE:false`.
-4. smoke/canary 通过后，由 Access admin 单独激活。`ready` 与 `active` 不等价。
-   After smoke/canary approval, an Access admin activates separately. `ready` is not `active`.
+## 静态资产与冻结集合 / Static assets and frozen sets
 
-当前 R2 尚未开通：真实云上传、部署和激活仍是外部 pending，不能用本地测试冒称上线完成。
-R2 is currently unprovisioned: actual cloud upload, deployment and activation remain external pending work; local tests do not establish production completion.
+Ops 配置只允许下列已审核资产策略，不是无条件开放任意 `assets`：
+Ops accepts only this reviewed asset policy, not an unrestricted `assets` escape hatch:
 
-## Rust/Wasm 符号契约 / Rust/Wasm symbol contract
+```json
+{
+  "assets": {
+    "directory": "../../apps/ops/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  }
+}
+```
 
-- JS 使用 bundler 生成的相邻 `<entrypoint>.map`，入口尾部实际引用 `//# sourceMappingURL=<entrypoint>.map`；不能伪造 Rust source map。
-  JS uses a bundler-produced adjacent `<entrypoint>.map` referenced by an actual trailing `//# sourceMappingURL=<entrypoint>.map`; do not fabricate Rust source maps.
-- Rust 原生栈使用最终 wasm-bindgen 处理模块中的 DWARF；编译保留 debug 信息，必须验证 wasm-bindgen 未移除 `.debug_info`。
-  Rust native frames use DWARF from the final wasm-bindgen-processed module; preserve compiler debug information and verify `.debug_info` survived wasm-bindgen.
-- `status_release::split_wasm(&bytes)` 返回 `(runtime_bytes, build_id)`，只移除 `.debug_*` custom sections，保留 `name`、`producers` 等；原始输入作为 `debug_symbols`。`build_id` 为去除所有 custom sections 后完整 Wasm 的 `sha256:<hex>`。
-  `status_release::split_wasm(&bytes)` returns `(runtime_bytes, build_id)`, removing only `.debug_*` custom sections while retaining `name`, `producers`, etc. Save the original input as `debug_symbols`. `build_id` is `sha256:<hex>` of the complete Wasm after excluding all custom sections.
-- `binary` runtime 和 `debug_symbols` 声明相同 build_id；CLI 验证二者完整可执行 section 字节相同且 symbols 含非空 `.debug_info`。符号不应作为 Worker runtime 模块上传，但仍需进入 R2 注册表。
-  Declare the same build ID for `binary` runtime and `debug_symbols`. The CLI compares all executable section bytes and requires nonempty `.debug_info` in symbols. Symbols should not be deployed as runtime modules but must be registered in R2.
+`status-build` 枚举已构建 `apps/ops/dist`，为每个文件保留真实 MIME，并添加 `asset_path`。JS 使用 `other` + `text/javascript`，其 Vite map 使用 `source_map` + `application/json`，既有 map 门禁不变。另写 `dist/rust/ops.assets-manifest.json`，逐项绑定静态 URL 路径、MIME、大小和 SHA-256，并作为 `manifest` 产物登记；release 配置以 `asset_manifest` 引用它。文件 basename 冲突、未知 MIME、隐藏文件、symlink、`_headers`/`_redirects` 与超过 25 MiB 的单文件明确失败，不能通过错标二进制绕过。
+`status-build` inventories built `apps/ops/dist`, preserving real MIME types and adding `asset_path`. JS uses `other` plus `text/javascript`, and its Vite map uses `source_map` plus `application/json`; existing map gates remain. `dist/rust/ops.assets-manifest.json` binds static URL paths, MIME, sizes and SHA-256, is registered as a manifest artifact, and is referenced by `asset_manifest`. Duplicate basenames, unknown MIME types, hidden files, symlinks, `_headers`/`_redirects`, and files above 25 MiB fail explicitly rather than bypassing gates through binary mislabeling.
 
-## 验证与边界 / Verification and boundaries
+Snapshot 将 Worker modules 和 static assets 放入不同目录，保留 import/map 相对布局；只复制登记字节。原静态目录必须与登记集合完全一致，快照的 `assets.directory` 指向私有目录。workspace 后续增加文件或修改原文件不会混入部署；快照内增加文件也被集合审计拒绝。前端 `.map` 是静态发布集合的一部分，会被公开服务；Rust DWARF 只进入私有 R2 产物集合，不作为静态或 Worker 模块部署。
+Snapshots separate Worker modules from static assets, preserve relative imports/maps, and copy only registered bytes. The original asset directory must exactly match the declared set; `assets.directory` is rewritten to the private directory. Later workspace additions or mutations cannot enter deployment, and additions inside the snapshot fail set auditing. Frontend maps are public static assets; Rust DWARF stays in the private R2 artifact set and is deployed neither as static files nor Worker modules.
 
-`cargo test -p status-release` 使用真实临时文件、SHA/MD5 已知答案、Wasm section fixture 和本地真实 TLS 服务器覆盖 register/session/PUT/commit/ready，包括不可变 PUT 的 412 路径。`cargo clippy -p status-release --all-targets -- -D warnings` 检查所有 target。
-`cargo test -p status-release` uses actual temporary files, known-answer SHA/MD5 tests, Wasm section fixtures and a real local TLS server for register/session/PUT/commit/ready, including immutable PUT 412. `cargo clippy -p status-release --all-targets -- -D warnings` checks all targets.
+## Rust 符号与信任边界 / Rust symbols and trust boundary
 
-信任边界：受审批 runner、固定版本构建工具与 Git checkout 仍受信任；此工具没有实现完整的独立签名构建证明，也不能证明 source map 的 mappings 在语义上准确。DWARF 配对和逐字节 manifest 解决产物错配，不证明编译器无恶意。
-Trust boundary: the approved runner, pinned build tools and Git checkout remain trusted. This tool does not implement independently signed build attestations and cannot prove semantic accuracy of map mappings. DWARF pairing and exact manifests prevent mismatches, not malicious compilers.
+JS map 由真正的 esbuild/Vite 生成，映射到实际 JS 输入；不伪称 Rust source map。`split_wasm` 只移除最终 SDK Wasm 的 `.debug_*` custom sections，保留 name/producers；原模块作为 DWARF 符号保存。runtime/symbols 的全部非 custom section 字节必须相同，build_id 为它们的 SHA-256；符号必须含非空 `.debug_info`。
+JS maps come from actual esbuild/Vite transformations and describe real JS inputs, not fabricated Rust maps. `split_wasm` removes only `.debug_*` custom sections from final SDK Wasm, preserving name/producers; the original module is retained as DWARF symbols. All non-custom runtime/symbol sections must match, their SHA-256 is the build ID, and symbols must contain nonempty `.debug_info`.
 
-## 依据 / References
+顶层 `artifact_digest` 仅指实际 Wrangler 入口字节，不是整个模块图；固定声明式 `status.js` 跨 Rust 实现变更可以保持相同摘要，完整 immutable manifest 仍绑定全部模块、符号和静态路径清单。受审批 runner、固定工具链和公共 JWKS 仍受信；不声称抵御恶意编译器或同用户进程主动篡改私有临时目录。
+Top-level `artifact_digest` identifies only actual Wrangler entry bytes, not the whole module graph. A fixed declarative `status.js` may retain its digest across Rust changes; the full immutable manifest binds every module, symbol and static path inventory. Approved runners, pinned tools and public JWKS remain trusted; malicious compilers or same-user processes actively modifying private temporary directories are outside this protection claim.
 
-- [Cloudflare bundling](https://developers.cloudflare.com/workers/wrangler/bundling/): prebuilt Workers can use `--no-bundle`; Wasm remains a separate module.
-- [Cloudflare source maps](https://developers.cloudflare.com/workers/observability/source-maps/): generated source maps are uploaded using Wrangler support.
-- [Cloudflare Wrangler deploy](https://developers.cloudflare.com/workers/wrangler/commands/workers/): local dry-run supplies inspectable pre-deployment output.
-- [in-toto, USENIX Security 2019](https://www.usenix.org/conference/usenixsecurity19/presentation/torres-arias): end-to-end supply-chain integrity motivates explicit ordered steps and byte binding; this CLI does not claim full in-toto assurance.
+## 验证 / Validation
 
-### 冻结部署目录 / Frozen deployment directory
+```sh
+cargo test -p status-release -- --include-ignored
+cargo test -p status-build -- --include-ignored
+cargo clippy -p status-release -p status-build --all-targets -- -D warnings
+```
 
-发布器把已声明 runtime/map 复制到私有临时目录，保留相对 import/map 结构；平台配置同时冻结，`main`、`base_dir` 和模块扫描根指向快照。注册前 dry-run 与最终正常/bootstrap 部署都只读取同一快照，因此注册网络请求期间 workspace 新增 `extra.js`/`extra.wasm` 或修改原文件不会混入部署。实际已安装 Wrangler 的测试覆盖这个场景。
-The releaser copies only declared runtime/maps into a private temporary directory while preserving relative imports/maps. Platform configuration is frozen with `main`, `base_dir` and module scanning rooted in that snapshot. Pre-registration dry-run and final normal/bootstrap deployment read the same snapshot; workspace additions such as `extra.js`/`extra.wasm` or original-file mutations during registry requests cannot enter deployment. A test using the installed Wrangler covers this scenario.
+覆盖真实 HTTPS register/session/PUT/commit/ready（含 412 与失败）、真实 Wrangler versions dry-run（含静态快照）、精确 version receipt/100% 调用、路径/MIME/集合篡改、RSA-3072 公钥匹配/错误 origin。`dry-run` 不上传 Cloudflare 静态字节：测试证明本地快照和模块输入，不能冒称已完成云上传或 DNS 验证；真实平台发布仍需授权后的独立结果。
+Coverage includes real HTTPS register/session/PUT/commit/ready (412 and failure cases), real Wrangler versions dry-runs with static snapshots, exact receipt/100% invocation, path/MIME/set tampering, and RSA-3072 matching/wrong-origin checks. Dry-run does not upload Cloudflare static bytes: tests establish local snapshots/module inputs, not completed cloud uploads or DNS validation. Actual platform publication requires separate authorized results.
 
-当前只支持独立 backend Worker 配置；拒绝 `build`、`env`、`assets`、`site`、`wasm_modules`、`text_blobs`、`data_blobs` 外部文件/覆盖通道。D1/R2/service bindings 保留。平台工具链仍属于受信 runner，不声称抵御同用户权限主动篡改私有临时目录的恶意进程。
-Only standalone backend Worker configurations are supported. `build`, `env`, `assets`, `site`, `wasm_modules`, `text_blobs`, and `data_blobs` external-file/override channels are rejected. D1/R2/service bindings are retained. The toolchain remains part of the trusted runner; protection against a malicious same-user process actively modifying private temporary directories is not claimed.
-
-### 顶层摘要语义 / Top-level digest semantics
-
-`artifact_digest` 是真实 Wrangler 入口文件的 SHA-256，不是整个模块图的摘要。`status.js` 是固定声明式组合器，因此 Rust 实现变化时该摘要可能保持不变；完整不可变 manifest 的 `artifacts` 列表仍逐一绑定 public/admin Wasm、glue 和符号字节。不能把顶层字段单独用作整个 release 的内容身份。
-`artifact_digest` is the SHA-256 of the actual Wrangler entrypoint, not the whole module graph. Because `status.js` is a fixed declarative composition, its digest may remain unchanged when Rust implementation changes. The complete immutable manifest still binds each public/admin Wasm, glue and symbol artifact individually. Never use the top-level field alone as the content identity of the entire release.
+依据 / References: [Cloudflare versions](https://developers.cloudflare.com/workers/versions-and-deployments/), [Static asset bindings](https://developers.cloudflare.com/workers/static-assets/binding/), [esbuild API](https://esbuild.github.io/api/), [jsonwebtoken](https://docs.rs/jsonwebtoken/10.4.0/jsonwebtoken/), [in-toto, USENIX Security 2019](https://www.usenix.org/conference/usenixsecurity19/presentation/torres-arias).

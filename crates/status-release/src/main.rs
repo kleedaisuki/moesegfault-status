@@ -8,14 +8,11 @@ struct Args {
     #[arg(long)]
     config: PathBuf,
     /// 只校验并输出 manifest。 / Validate and print manifest only.
-    #[arg(long, conflicts_with_all = ["dry_run", "bootstrap_only"])]
+    #[arg(long, conflicts_with = "dry_run")]
     verify_only: bool,
     /// 校验并执行 Wrangler 本地 dry-run，不访问注册表。 / Validate and execute local Wrangler dry-run without registry access.
-    #[arg(long, conflicts_with = "bootstrap_only")]
-    dry_run: bool,
-    /// 首次受控注册器引导；要求显式环境确认。 / First controlled registry bootstrap; requires explicit environment acknowledgement.
     #[arg(long)]
-    bootstrap_only: bool,
+    dry_run: bool,
 }
 /// 将错误输出限制在不含秘密的上下文。 / Restrict error output to secret-free context.
 fn main() {
@@ -34,12 +31,5 @@ fn run() -> anyhow::Result<()> {
         println!("{}", status_release::canonical(&manifest));
         return Ok(());
     }
-    status_release::release(
-        &config,
-        &base,
-        &artifacts,
-        &manifest,
-        args.dry_run,
-        args.bootstrap_only,
-    )
+    status_release::release(&config, &base, &artifacts, &manifest, args.dry_run)
 }

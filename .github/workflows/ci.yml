@@ -59,6 +59,8 @@ jobs:
       - uses: ./.github/actions/setup-rust-wasm
       - name: Install pinned Workers Rust build tool
         run: cargo install worker-build --version 0.8.5 --locked
+      - name: Build operations UI for immutable static-asset packaging
+        run: pnpm build:frontend
       # 生产字节先构建后审核；Wrangler不包含build钩子。 / Build and review production bytes first; Wrangler has no build hook.
       - name: Build all Rust production Workers and debug artifacts
         run: pnpm build:backend
@@ -78,8 +80,6 @@ jobs:
         run: pnpm test
       - name: Validate prebuilt status, gateway and regional Worker uploads offline
         run: pnpm deploy:check
-      - name: Build operations UI
-        run: pnpm build:frontend
   database:
     name: SQL schema tests
     runs-on: ubuntu-24.04

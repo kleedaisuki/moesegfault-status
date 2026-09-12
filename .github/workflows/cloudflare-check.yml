@@ -71,23 +71,7 @@ jobs:
           await check('deployed_worker_scripts', `${accountPath}/workers/scripts`, rows => ({scripts: (Array.isArray(rows) ? rows : []).filter(row => row.id?.startsWith('moesegfault-')).map(row => pick(row, ['id']))}));
           await check('r2_target_bucket', `${accountPath}/r2/buckets/moesegfault-observability`, row => pick(row, ['name', 'location', 'storage_class']));
           await check('queues_first_page', `${accountPath}/queues?per_page=100&page=1`, rows => ({queues: (Array.isArray(rows) ? rows : []).filter(row => row.queue_name?.startsWith('moesegfault-status-')).map(row => pick(row, ['queue_id', 'queue_name']))}));
-          const zones = [
-            ['moesegfault.dev', '6edff81c6ed02f412e70868076411a5e'],
-            ['kleeworks.org', 'ca6b6ea568097779553f8724e69a42b5'],
-          ];
-          for (const [name, id] of zones) {
-            await check(`zone_${name}`, `zones/${id}`, row => ({...pick(row, ['id', 'name', 'status']), account_matches: row.account?.id === account}));
-            for (const prefix of ['status', 'ops']) {
-              const host = `${prefix}.${name}`;
-              await check(`dns_${host}`, `zones/${id}/dns_records?name=${encodeURIComponent(host)}&per_page=100`, rows => ({records: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id', 'name', 'type', 'proxied']))}));
-              await check(`worker_domain_${host}`, `${accountPath}/workers/domains?hostname=${encodeURIComponent(host)}`, rows => ({domains: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id', 'hostname', 'service', 'environment', 'zone_id']))}));
-            }
-          }
-          await check('access_organization', `${accountPath}/access/organizations`, row => pick(row, ['name', 'auth_domain']));
-          await check('access_apps_first_page', `${accountPath}/access/apps?per_page=100&page=1`, rows => ({apps: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id', 'name', 'domain', 'type', 'aud']))}));
-          await check('access_identity_providers_first_page', `${accountPath}/access/identity_providers?per_page=100&page=1`, rows => ({identity_providers: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id', 'name', 'type']))}));
-          // 不输出邮箱、IP、登录记录；身份 ID 足以判断是否已初始化。 / Do not expose email, IP, or login history; IDs suffice to detect initialized identities.
-          await check('access_users_first_page', `${accountPath}/access/users?per_page=100&page=1`, rows => ({users: (Array.isArray(rows) ? rows : []).map(row => pick(row, ['id']))}));
+          // 域名/DNS只由本机CLI管理；浏览器不再依赖Access。 / Domains and DNS are managed only by local CLI; browser authentication does not depend on Access.
           const failed = checks.filter(row => !row.success && !['user_token_verify', 'account_token_verify'].includes(row.check));
           console.log(JSON.stringify({summary: {checks: checks.length, denied_or_failed: failed.map(row => row.check),
             token_verified: [userToken, accountToken].some(row => row.success && row.status === 'active'),
