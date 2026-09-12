@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "moesegfault-ops-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-12",
+  "vars": {
+    "ACCESS_ISSUER": "https://REPLACE-ME.cloudflareaccess.com",
+    "ACCESS_AUDIENCE": "REPLACE_ME",
+    "ACCESS_MAX_TOKEN_AGE_SECONDS": "86400",
+    "ACCESS_ROLE_MAPPING": "{}",
+    "OPS_ORIGIN": "https://ops.moesegfault.dev",
+    "DEPLOYMENT_ID": "",
+    "GIT_COMMIT": "",
+    "ARTIFACT_DIGEST": "",
+    "STATUS_VERSION": "",
+    "ENVIRONMENT": "development",
+  },
+  "services": [
+    {
+      "binding": "STATUS",
+      "service": "moesegfault-status",
+      "entrypoint": "AdminRpc",
+    },
+  ],
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "traces": { "enabled": true, "head_sampling_rate": 1 },
+  },
+}
