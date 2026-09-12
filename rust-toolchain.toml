@@ -1,0 +1,5 @@
+# 始终使用稳定工具链；Cargo.lock 固定依赖。 / Stable toolchain; Cargo.lock pins dependencies.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

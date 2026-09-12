@@ -1,0 +1,11 @@
+# 纯领域核心可同时在原生测试和 Workers WASM 中运行。 / Pure core runs in native tests and Workers WASM.
+[workspace]
+members = ["crates/status-domain"]
+resolver = "3"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "debuginfo"
