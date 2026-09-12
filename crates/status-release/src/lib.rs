@@ -17,6 +17,7 @@ use status_domain::{Artifact, ArtifactKind, DeploymentManifest, Environment};
 use std::{
     collections::BTreeSet,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -715,6 +716,25 @@ fn mint_machine_token(
     validate_token(&token, config)?;
     Ok(token)
 }
+/// 只映射固定协议分类；任意响应文本都不能流入发布日志。
+/// Map only fixed protocol categories; arbitrary response text must never reach release logs.
+fn registry_problem(bytes: &[u8]) -> &'static str {
+    if bytes.len() > 8192 {
+        return "details-suppressed";
+    }
+    let Ok(value) = serde_json::from_slice::<Value>(bytes) else {
+        return "details-suppressed";
+    };
+    match value["type"].as_str() {
+        Some("urn:moesegfault:problem:invalid-machine-token") => "invalid-machine-token",
+        Some("urn:moesegfault:problem:authentication-required") => "authentication-required",
+        Some("urn:moesegfault:problem:authentication-unavailable") => "authentication-unavailable",
+        Some("urn:moesegfault:problem:invalid-machine-claims") => "invalid-machine-claims",
+        Some("urn:moesegfault:problem:insufficient-scope") => "insufficient-scope",
+        _ => "details-suppressed",
+    }
+}
+
 /// 注册客户端，不导出或记录 bearer 与上传 URL。 / Registry client; never exports or logs bearer or upload URLs.
 struct Registry {
     /// 不重定向的 HTTP 客户端。 / Non-redirecting HTTP client.
@@ -759,7 +779,7 @@ impl Registry {
             token,
         })
     }
-    /// 限定 JSON envelope，错误体完全抑制。 / Require a JSON envelope and suppress error bodies entirely.
+    /// 限定 JSON envelope，仅输出固定白名单错误分类。 / Require a JSON envelope; report only allowlisted static error categories.
     fn request(
         &self,
         method: Method,
@@ -781,11 +801,15 @@ impl Registry {
         let response = request
             .send()
             .map_err(|_| anyhow::anyhow!("registry transport failed (details suppressed)"))?;
-        ensure!(
-            response.status().is_success(),
-            "registry request failed: HTTP {}",
-            response.status().as_u16()
-        );
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let mut bytes = Vec::new();
+            let category = match response.take(8193).read_to_end(&mut bytes) {
+                Ok(_) => registry_problem(&bytes),
+                Err(_) => "details-suppressed",
+            };
+            bail!("registry request failed: HTTP {status} ({category})");
+        }
         let value: Value = response
             .json()
             .map_err(|_| anyhow::anyhow!("invalid registry response JSON"))?;
@@ -1392,6 +1416,23 @@ pub fn split_wasm(bytes: &[u8]) -> Result<(Vec<u8>, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 错误分类有界且不回显秘密或攻击者控制的字段。 / Error classification is bounded and never reflects secrets or attacker-controlled fields.
+    #[test]
+    fn registry_problem_suppresses_untrusted_details() {
+        assert_eq!(
+            registry_problem(br#"{"type":"urn:moesegfault:problem:invalid-machine-token","detail":"secret-value"}"#),
+            "invalid-machine-token"
+        );
+        for bytes in [
+            br#"{"type":"secret-value"}"#.as_slice(),
+            br#"{"title":"invalid-machine-token","detail":"secret-value"}"#,
+            b"secret-value",
+            &vec![b'x'; 8193],
+        ] {
+            assert_eq!(registry_problem(bytes), "details-suppressed");
+        }
+    }
     use std::{
         io::{Read, Write},
         net::TcpListener,
