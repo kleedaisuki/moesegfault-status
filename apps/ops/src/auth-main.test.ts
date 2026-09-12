@@ -39,7 +39,7 @@ it("requires login before reading management data and preserves the empty catalo
   mocks.session.mockResolvedValue({
     data: {
       subject: "owner",
-      email: "redacted@example.invalid",
+      email: "owner@example.test",
       roles: ["admin"],
     },
   });
@@ -51,6 +51,7 @@ it("requires login before reading management data and preserves the empty catalo
   );
   expect(mocks.login).toHaveBeenCalledWith(" exact password unchanged ");
   expect(document.body.textContent).toContain("暂无可验证服务数据");
+  expect(document.body.textContent).not.toContain("owner@example.test");
   expect(document.body.textContent).not.toMatch(
     /Cloudflare Access|设置管理员密码|修改密码/,
   );

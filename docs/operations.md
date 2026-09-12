@@ -22,6 +22,12 @@
 
 ### 1.1 单管理员密码 / Single-administrator password
 
+管理员审计标识 `ADMIN_EMAIL` 与密码记录一样，只通过 Cloudflare Worker Secret 配置，不得写入仓库 vars、公开页面或未认证响应。该标识仅用于认证后的内部业务协议，不承担身份验证；身份验证仍依赖预置密码。缺少或无效标识时认证失败关闭。 / Configure the administrator audit identity `ADMIN_EMAIL` exclusively as a Cloudflare Worker Secret, like the password record; never place it in repository vars, public pages, or unauthenticated responses. It exists only for authenticated internal business contracts and is not proof of identity. Authentication still requires the preconfigured password and fails closed if the identity is missing or invalid.
+
+2026-09-12 隐私修复已将该标识迁入真实 `secret_text`，从登录前后 UI 和当前浏览器产物移除邮箱。bootstrap 维护版本仅通过 `versions upload` / `versions deploy` 全量切换，未更改 DNS、触发器或绕过生产就绪门禁。HTTPS 核验当前页面、JS、CSS 与本地构建摘要相同，旧 JS/source map 地址不再返回含邮箱的旧内容；历史 Git 提交未被改写。 / The privacy remediation moved this identity into an actual `secret_text` and removed the email from UI and current browser artifacts. Bootstrap maintenance used only version upload/deploy at 100%, without changing DNS/triggers or bypassing production readiness. HTTPS checks matched current HTML/JS/CSS to build hashes and confirmed old JS/map URLs no longer return the identity-bearing content. Git history was not rewritten.
+
+运维 UI 使用官方 `moesegfault-style v0.1.2` 静态分发，固定来源提交与 SHA-256，详情见 `apps/ops/vendor/README.md`。 / The operations UI consumes the official pinned `moesegfault-style v0.1.2` static release; see `apps/ops/vendor/README.md` for source and integrity details.
+
 不使用 Cloudflare Access。管理员只有一个 owner，密码事先生成并保存在受操作系统访问控制列表（Access Control List, ACL）保护的本机私密文件中；仓库不记录该文件路径、密码或密码记录。前端只提供登录和退出，没有 setup、注册、账号管理或修改密码入口。 / Cloudflare Access is not used. A single owner uses a pre-generated password retained in an OS-ACL-protected local private file. Neither its path nor the password/record belongs in source. The UI provides login/logout only.
 
 - `ADMIN_PASSWORD_RECORD` 是 Worker secret：PBKDF2-SHA256（Password-Based Key Derivation Function 2），600,000 次迭代、16 字节随机盐、32 字节派生哈希。密码明文不进入 D1、GitHub、构建产物或日志。 / The Worker secret stores a PBKDF2-SHA256 record with 600,000 iterations, a 16-byte random salt and a 32-byte derived hash. Plaintext never enters D1, GitHub, build artifacts or logs.

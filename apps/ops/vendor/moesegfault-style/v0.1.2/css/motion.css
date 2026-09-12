@@ -1,0 +1,85 @@
+@layer moe.tokens, moe.reset, moe.foundation, moe.components, moe.utilities;
+
+@layer moe.utilities {
+  /* 默认可见；只有明确未要求减少动态时才启用。Visible by default; opt in only with no motion preference. */
+  @media (prefers-reduced-motion: no-preference) {
+    .moe-motion:not([data-motion-disabled="true"]) {
+      animation-duration: var(--moe-enter-duration, var(--moe-motion-slow, 360ms));
+      animation-delay: var(--moe-enter-delay, 0ms);
+      animation-timing-function: var(--moe-motion-ease-emphasized);
+      animation-fill-mode: backwards;
+      animation-iteration-count: 1;
+    }
+    .moe-motion[data-motion="fade"]:not([data-motion-disabled="true"]) {
+      animation-name: moe-enter-fade;
+    }
+    .moe-motion[data-motion="rise"]:not([data-motion-disabled="true"]) {
+      animation-name: moe-enter-rise;
+    }
+    .moe-motion[data-motion="scale"]:not([data-motion-disabled="true"]) {
+      animation-name: moe-enter-scale;
+    }
+    .moe-motion[data-motion="slide"]:not([data-motion-disabled="true"]) {
+      animation-name: moe-enter-slide;
+    }
+    /* 聚焦立即显示，避免延时期间出现不可见的焦点。Focus reveals immediately, including during delay. */
+    .moe-motion[data-motion]:not([data-motion-disabled="true"]):focus-within {
+      animation: none;
+    }
+    .moe-hover-lift,
+    .moe-press {
+      transition: transform var(--moe-motion-fast) var(--moe-motion-ease-standard);
+    }
+    @media (hover: hover) {
+      .moe-hover-lift:hover:not(:disabled, [aria-disabled="true"]) {
+        transform: translateY(-3px);
+      }
+    }
+    .moe-press:active:not(:disabled, [aria-disabled="true"]) {
+      transform: scale(0.98);
+    }
+  }
+  @keyframes moe-enter-fade {
+    from {
+      opacity: 0;
+    }
+    to {
+      opacity: 1;
+    }
+  }
+  @keyframes moe-enter-rise {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes moe-enter-scale {
+    from {
+      opacity: 0;
+      transform: scale(0.97);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @keyframes moe-enter-slide {
+    from {
+      opacity: 0;
+      transform: translateX(-12px);
+    }
+    to {
+      opacity: 1;
+      transform: none;
+    }
+  }
+  @media (forced-colors: active) {
+    .moe-motion[data-motion]:not([data-motion-disabled="true"]) {
+      animation: none;
+    }
+  }
+}

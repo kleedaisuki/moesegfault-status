@@ -1,0 +1,2 @@
+# 上游发布摘要依赖原始字节，禁止自动转换换行。 / Preserve upstream release hashes without newline conversion.
+apps/ops/vendor/moesegfault-style/** -text

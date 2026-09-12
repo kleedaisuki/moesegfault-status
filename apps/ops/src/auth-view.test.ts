@@ -17,7 +17,11 @@ describe("single administrator authentication", () => {
     const password = form.elements.namedItem("password") as HTMLInputElement;
     expect(form.querySelectorAll("input")).toHaveLength(1);
     expect(password.autocomplete).toBe("current-password");
-    expect(view.textContent).toContain("redacted@example.invalid");
+    expect(view.textContent).not.toContain("@");
+    expect(view.querySelector(".moe-brand-mark")).not.toBeNull();
+    expect(view.querySelector("button")?.classList.contains("moe-button")).toBe(
+      true,
+    );
     expect(view.textContent).not.toMatch(/注册|设置密码|修改密码/);
     password.value = "  correct horse battery staple  ";
     form.dispatchEvent(new Event("submit", { cancelable: true }));

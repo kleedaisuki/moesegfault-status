@@ -1,0 +1,6 @@
+/** 图标在文字和 flex 布局中保持尺寸；不改变品牌色。Keep icon dimensions in text and flex layouts without altering brand colors. */
+.moe-icon {
+  display: inline-block;
+  flex-shrink: 0;
+  vertical-align: -0.125em;
+}

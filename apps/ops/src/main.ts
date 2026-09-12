@@ -39,6 +39,12 @@ import {
   type ControlPlaneChecks,
 } from "./health-view";
 import { authForm } from "./auth-view";
+import "../vendor/moesegfault-style/v0.1.2/css/tokens.css";
+import "../vendor/moesegfault-style/v0.1.2/css/foundation.css";
+import "../vendor/moesegfault-style/v0.1.2/css/components.css";
+import "../vendor/moesegfault-style/v0.1.2/css/icons.css";
+import "../vendor/moesegfault-style/v0.1.2/css/motion.css";
+import { brandMark } from "./brand-view";
 import "./styles.css";
 
 type NodeChild = Node | string | null | undefined;
@@ -51,6 +57,19 @@ function el<K extends keyof HTMLElementTagNameMap>(
 ): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
   if (className) node.className = className;
+  // 沿用官方组件类与变体契约，不复刻组件配色。 / Reuse official classes and variants, not copied palettes.
+  if (
+    tag === "button" &&
+    !node.classList.contains("tab") &&
+    !node.classList.contains("issue")
+  ) {
+    node.classList.add("moe-button");
+    if (node.classList.contains("secondary"))
+      node.dataset.variant = "secondary";
+    if (node.classList.contains("danger")) node.dataset.variant = "danger";
+  }
+  if (node.classList.contains("panel")) node.classList.add("moe-card");
+  if (node.classList.contains("status")) node.classList.add("moe-badge");
   for (const child of children)
     if (child != null)
       node.append(
@@ -167,32 +186,16 @@ function canAdmin(): boolean {
 /** 重绘整体 shell；数据只来自当前内存快照 / Render the shell from the current in-memory snapshot. */
 function render(): void {
   shell.replaceChildren();
-  const identityName = state.principal
-    ? stringOf(
-        state.principal,
-        "email",
-        stringOf(state.principal, "subject", "已认证"),
-      )
-    : "身份未确认";
+  const identityName = state.principal ? "管理员" : "身份未确认";
   const top = el(
     "header",
     "topbar",
-    el(
-      "div",
-      "brand",
-      el("div", "brand-mark", "mS"),
-      el(
-        "div",
-        "",
-        el("span", "eyebrow", "Operations control plane"),
-        el("h1", "", "moeSegFault Status"),
-      ),
-    ),
+    brandMark(),
     el(
       "div",
       "identity",
       el("span", "", identityName),
-      el("span", "role", "管理员"),
+      el("span", "role moe-badge", "已认证"),
     ),
   );
   const logout = el("button", "", "退出登录");
@@ -1522,7 +1525,7 @@ async function bootstrap(): Promise<void> {
     state.principal = data;
     state.checks.access = {
       state: "healthy",
-      detail: `${data.email} · 管理员`,
+      detail: "管理员会话已验证",
     };
   } catch {
     showAuthentication();

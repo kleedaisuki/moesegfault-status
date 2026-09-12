@@ -51,7 +51,7 @@ beforeEach(async () => {
   );
   await import("./main");
   await vi.waitFor(() =>
-    expect(document.body.textContent).toContain("ops@example.com"),
+    expect(document.body.textContent).toContain("退出登录"),
   );
 });
 afterEach(() => {

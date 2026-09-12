@@ -1,13 +1,16 @@
+import { brandMark } from "./brand-view";
+
 /** 单管理员可访问性表单，不回显服务端身份错误。 / Accessible single-owner form without reflecting server identity errors. */
 export function authForm(
   submit: (password: string) => Promise<void>,
 ): HTMLElement {
   const section = document.createElement("section");
-  section.className = "panel auth-panel";
+  section.className = "panel moe-card auth-panel";
   const title = document.createElement("h2");
   title.textContent = "管理员登录";
-  const owner = document.createElement("p");
-  owner.textContent = "唯一管理员：redacted@example.invalid";
+  const description = document.createElement("p");
+  description.className = "muted";
+  description.textContent = "输入预置密码，进入运维控制台。";
   const form = document.createElement("form");
   const inputs: HTMLInputElement[] = [];
   const add = (
@@ -34,6 +37,7 @@ export function authForm(
   message.setAttribute("aria-live", "polite");
   const button = document.createElement("button");
   button.type = "submit";
+  button.className = "moe-button";
   button.textContent = "登录";
   form.append(message, button);
   form.addEventListener("submit", async (event) => {
@@ -55,6 +59,6 @@ export function authForm(
       button.disabled = false;
     }
   });
-  section.append(title, owner, form);
+  section.append(brandMark(), title, description, form);
   return section;
 }
