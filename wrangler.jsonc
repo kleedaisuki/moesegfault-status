@@ -1,16 +1,96 @@
 {
-  // 仅配置资源；部署前补充 Worker 入口。 / Resources only; add a Worker entry point before deployment.
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  // TypeScript 适配平台，Rust WASM 负责领域规则。 / TypeScript adapts the platform; Rust WASM owns domain rules.
   "name": "moesegfault-status",
+  "main": "workers/status/src/index.ts",
   "account_id": "07109e406d4e1ab7a0997dd399db6fd5",
   "compatibility_date": "2026-09-12",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "build": { "command": "node scripts/build-wasm.mjs" },
+  "vars": {
+    "ENVIRONMENT": "development",
+    "STATUS_VERSION": "0.1.0",
+    // 发布脚本必须填入已注册 manifest 的真实值。 / Release must inject actual registered manifest values.
+    "DEPLOYMENT_ID": "",
+    "GIT_COMMIT": "",
+    "ARTIFACT_DIGEST": "",
+    "MACHINE_ISSUER": "https://issuer.invalid",
+    "MACHINE_AUDIENCE": "moesegfault-status",
+    "MACHINE_JWKS_URL": "https://issuer.invalid/.well-known/jwks.json",
+    "R2_ACCOUNT_ID": "07109e406d4e1ab7a0997dd399db6fd5",
+    "R2_BUCKET_NAME": "moesegfault-observability",
+    // 空映射不产生区域证据；部署时绑定私有默认 fetch 执行器。 / An empty map produces no regional evidence; bind private default-fetch executors for deployment.
+    "PROBE_REGIONAL_CONFIG": "{}",
+    // 后端端点与凭据分离；空表明确禁用查询。 / Separate endpoints from credentials; an empty map disables queries.
+    "TELEMETRY_BACKEND_CONFIG_JSON": "{}",
+    "NOTIFICATION_QUEUE_NAME": "moesegfault-status-notifications",
+  },
+  // 缺少秘密时失败关闭；不得在文件中放入值。 / Fail closed without secrets; never put secret values in this file.
+  "secrets": {
+    "required": [
+      "CURSOR_SIGNING_KEY",
+      "R2_ACCESS_KEY_ID",
+      "R2_SECRET_ACCESS_KEY",
+      "NOTIFICATION_WEBHOOK_URL",
+      "NOTIFICATION_AUTHORIZATION",
+      "TELEMETRY_AUTH_JSON",
+    ],
+  },
+  "queues": {
+    "producers": [
+      {
+        "binding": "NOTIFICATION_QUEUE",
+        "queue": "moesegfault-status-notifications",
+      },
+      {
+        "binding": "DIAGNOSTIC_QUEUE",
+        "queue": "moesegfault-status-diagnostics",
+      },
+      {
+        "binding": "DIAGNOSTIC_DLQ",
+        "queue": "moesegfault-status-diagnostics-dlq",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "moesegfault-status-notifications",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 8,
+        "dead_letter_queue": "moesegfault-status-notifications-dlq",
+      },
+      {
+        "queue": "moesegfault-status-diagnostics",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "moesegfault-status-diagnostics-dlq",
+      },
+    ],
+  },
+  "r2_buckets": [
+    { "binding": "ARTIFACTS", "bucket_name": "moesegfault-observability" },
+  ],
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "moesegfault_status" },
+  ],
+  "triggers": { "crons": ["* * * * *"] },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+    "traces": { "enabled": true, "head_sampling_rate": 1 },
+  },
+  "version_metadata": { "binding": "VERSION_METADATA" },
   "d1_databases": [
     {
       // 权威领域状态共用一个事务边界，不存原始遥测。 / One transaction boundary for authoritative domain state, not raw telemetry.
       "binding": "DB",
       "database_name": "moesegfault-status",
       "database_id": "40674161-5e59-470c-bb1c-33bc612d7e6b",
-      // 后续使用编号迁移建表；当前远端数据库尚无领域表。 / Use numbered migrations for future schema; no domain tables exist yet.
-      "migrations_dir": "migrations"
-    }
-  ]
+      // 编号迁移是领域 schema 的唯一修改路径。 / Numbered migrations are the sole domain schema update path.
+      "migrations_dir": "migrations",
+    },
+  ],
 }
