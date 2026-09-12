@@ -94,17 +94,35 @@ class SchedulingStoreTest(SchemaTestCase):
     def test_outbox_owner_retry_and_expired_lease(self):
         """只允许当前 owner 确认；过期 lease 可重领。 / Only current owners acknowledge; expired leases may be reclaimed."""
         self.enqueue()
-        claimed=self.db.execute(SQL['CLAIM_OUTBOX_SQL'],('a',LATER,NOW,NOW,5)).fetchall()
+        claimed=self.db.execute(SQL['CLAIM_OUTBOX_SQL'],('a',LATER,NOW,NOW,1,5)).fetchall()
         self.assertEqual(claimed[0]['attempt_count'],1)
         self.db.execute(SQL['MARK_OUTBOX_DELIVERED_SQL'],(NOW,uuid7(2),'b'))
         self.assertEqual(self.db.execute('SELECT state FROM outbox').fetchone()[0],'processing')
         self.db.execute(SQL['MARK_OUTBOX_FAILED_SQL'],('pending',NOW,'timeout',uuid7(2),'a'))
-        self.assertEqual(self.db.execute(SQL['CLAIM_OUTBOX_SQL'],('b',LATER,NOW,NOW,5)).fetchone()['attempt_count'],2)
-        self.assertEqual(self.db.execute(SQL['CLAIM_OUTBOX_SQL'],('c',LATER,LATER,LATER,5)).fetchone()['attempt_count'],3)
+        self.assertEqual(self.db.execute(SQL['CLAIM_OUTBOX_SQL'],('b',LATER,NOW,NOW,1,5)).fetchone()['attempt_count'],2)
+        self.assertEqual(self.db.execute(SQL['CLAIM_OUTBOX_SQL'],('c',LATER,LATER,LATER,1,5)).fetchone()['attempt_count'],3)
         self.db.execute(SQL['MARK_OUTBOX_DELIVERED_SQL'],(LATER,uuid7(2),'b'))
         self.db.execute(SQL['MARK_OUTBOX_FAILED_SQL'],('dead',LATER,'timeout',uuid7(2),'c'))
         self.assertEqual(self.db.execute('SELECT state FROM outbox').fetchone()[0],'dead')
-        self.assertEqual(self.db.execute(SQL['CLAIM_OUTBOX_SQL'],('d',LATER,LATER,LATER,5)).fetchall(),[])
+        self.assertEqual(self.db.execute(SQL['CLAIM_OUTBOX_SQL'],('d',LATER,LATER,LATER,1,5)).fetchall(),[])
+
+    def test_disabled_notifications_preserve_external_events_without_blocking_internal_work(self):
+        """禁用通知不消耗外部事件重试或批次；重新启用可领取。 / Disabled notifications preserve external retries and batch capacity; re-enabling permits claims."""
+        external = uuid7(50)
+        self.enqueue(external, 'catalog.changed')
+        internal_events = ('maintenance.started', 'maintenance.expired', 'override.expired',
+                           'suppression.expired', 'status.reevaluation_requested')
+        for serial, event in enumerate(internal_events, 51):
+            self.enqueue(uuid7(serial), event)
+        claimed = self.db.execute(SQL['CLAIM_OUTBOX_SQL'], ('a',LATER,NOW,NOW,0,5)).fetchall()
+        self.assertEqual({row['event_type'] for row in claimed}, set(internal_events))
+        row = self.db.execute('SELECT state,attempt_count,lease_owner FROM outbox WHERE outbox_id=?', (external,)).fetchone()
+        self.assertEqual(tuple(row), ('pending', 0, None))
+        claimed = self.db.execute(SQL['CLAIM_OUTBOX_SQL'], ('b',LATER,NOW,NOW,1,5)).fetchall()
+        self.assertEqual([(row['outbox_id'], row['attempt_count']) for row in claimed], [(external, 1)])
+        self.db.execute(SQL['CLAIM_OUTBOX_SQL'], ('c',LATER,LATER,LATER,0,5)).fetchall()
+        row = self.db.execute('SELECT state,attempt_count,lease_owner FROM outbox WHERE outbox_id=?', (external,)).fetchone()
+        self.assertEqual(tuple(row), ('processing', 1, 'b'))
 
     def test_generation_changes_and_assertion_rollback(self):
         """配置和 checkpoint 修改使旧快照失效。 / Configuration and checkpoint changes invalidate old snapshots."""
