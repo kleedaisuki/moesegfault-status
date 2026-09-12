@@ -91,3 +91,6 @@ Templates cannot contain secrets or unknown fields. Merged configurations pass `
 
 Windows 平台通过 stage-relative esbuild 输入与输出参数避免 `\\?\` canonical 路径被序列化成不安全的绝对 `file:` source URL；已加入真实 esbuild 回归测试。`cargo test -p status-build -- --include-ignored` 需要先完成三项真实构建，随后会用发布器对所有 inventory 的真实文件重新校验。
 On Windows, stage-relative esbuild input/output arguments prevent canonical extended paths from becoming unsafe absolute `file:` source URLs; a real esbuild regression test covers this. `cargo test -p status-build -- --include-ignored` requires all three real builds first, then revalidates every inventory's actual files using the releaser.
+
+跨平台 esbuild 调用使用官方 Node `buildSync` API（固定表达式，包路径及 JSON 选项通过独立进程参数传递），不把 `bin/esbuild` 当作 JavaScript：npm 在 Linux 可以将该文件替换为原生 ELF。回归测试提供 ELF-header CLI fixture，同时使用真实已安装 API 验证生成文件和相对 source map；不会修改共享 node_modules。
+Cross-platform esbuild invocation uses the official Node `buildSync` API: a fixed expression receives the package path and JSON options as separate process arguments. It never assumes `bin/esbuild` is JavaScript; npm may replace that file with native ELF on Linux. A regression supplies an ELF-header CLI fixture while exercising the real installed API to verify generated files and relative source maps, without modifying shared node_modules. See [esbuild JavaScript API](https://esbuild.github.io/api/#sync).

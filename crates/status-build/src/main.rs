@@ -117,7 +117,7 @@ fn verify_tools(root: &Path) -> Result<()> {
         "worker-build must be exactly 0.8.5"
     );
     ensure!(
-        root.join("node_modules/esbuild/bin/esbuild").is_file(),
+        root.join("node_modules/esbuild/package.json").is_file(),
         "install pinned pnpm dependencies first"
     );
     Ok(())
@@ -163,16 +163,29 @@ fn transform(root: &Path, input: &Path, output: &Path) -> Result<()> {
             .strip_prefix(staging)
             .context("output must share source staging directory")?,
     );
+    let options = json!({
+        "entryPoints": [input.file_name().and_then(|name| name.to_str()).context("source filename must be UTF-8")?],
+        "bundle": false,
+        "format": "esm",
+        "target": "es2022",
+        "sourcemap": "linked",
+        "sourcesContent": true,
+        "outfile": slash(&relative_output),
+        "write": true,
+    });
+    // npm 在 Linux 可把 bin/esbuild 替换为 ELF；只使用官方包的 Node API。
+    // npm may replace bin/esbuild with ELF on Linux; use only the official package's Node API.
+    // 固定表达式不拼接源码或路径，全部选项作为独立 JSON 参数传递。
+    // The fixed expression interpolates neither code nor paths; options are a separate JSON argument.
     command
-        .arg(root.join("node_modules/esbuild/bin/esbuild"))
-        .arg(input.file_name().context("source filename missing")?)
         .args([
-            "--format=esm",
-            "--target=es2022",
-            "--sourcemap=linked",
-            "--sources-content=true",
+            "--input-type=commonjs",
+            "-e",
+            "require(process.argv[1]).buildSync(JSON.parse(process.argv[2]))",
+            "--",
         ])
-        .arg(format!("--outfile={}", slash(&relative_output)))
+        .arg(root.join("node_modules/esbuild"))
+        .arg(serde_json::to_string(&options)?)
         .current_dir(source_directory)
         .env_remove("MOE_MACHINE_JWT")
         .env_remove("CLOUDFLARE_API_TOKEN");
@@ -449,6 +462,45 @@ mod tests {
                 .is_some_and(|path| !path.contains(':') && !path.starts_with('/'))
         );
         assert!(!map["mappings"].as_str().unwrap().is_empty());
+    }
+    /// 即使 bin/esbuild 是 ELF 而非 JS，也必须通过真实官方 Node API 构建。
+    /// Build through the real official Node API even when bin/esbuild is ELF, not JavaScript.
+    #[test]
+    #[ignore = "requires installed esbuild"]
+    fn real_esbuild_api_ignores_native_binary_cli_entry() {
+        let root = fs::canonicalize(Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")).unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let fixture_root = fs::canonicalize(fixture.path()).unwrap();
+        let package = fixture_root.join("node_modules/esbuild");
+        fs::create_dir_all(package.join("bin")).unwrap();
+        // 测试 package main 指向已安装的真实 API；原生 CLI 是不可执行的 ELF fixture。
+        // Test package main points to the installed real API; the native CLI is a non-executable ELF fixture.
+        fs::write(
+            package.join("package.json"),
+            serde_json::to_vec(&json!({"main":root.join("node_modules/esbuild/lib/main.js")}))
+                .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            package.join("bin/esbuild"),
+            b"\x7fELF\x02\x01\x01\0not JavaScript",
+        )
+        .unwrap();
+        fs::create_dir(fixture_root.join("sources")).unwrap();
+        let input = fixture_root.join("sources/input.generated.js");
+        fs::write(&input, "export const answer = 42;\n").unwrap();
+        let output = fixture_root.join("runtime/output.js");
+        transform(&fixture_root, &input, &output).unwrap();
+        assert!(
+            fs::read_to_string(output)
+                .unwrap()
+                .contains("sourceMappingURL=output.js.map")
+        );
+        let map: Value =
+            serde_json::from_slice(&fs::read(fixture_root.join("runtime/output.js.map")).unwrap())
+                .unwrap();
+        assert_eq!(map["sourcesContent"][0], "export const answer = 42;\n");
+        assert!(!map["sources"][0].as_str().unwrap().contains(':'));
     }
     /// 完整构建后用发布器再次验证真实 runtime/map/DWARF；不登记或部署。
     /// Revalidate actual runtime/maps/DWARF after a complete build without registering or deploying.
