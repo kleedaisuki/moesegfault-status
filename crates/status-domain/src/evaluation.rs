@@ -225,6 +225,8 @@ pub fn evaluate_monitor(
         if last < stale_cutoff || location.window_started_at < window_start {
             continue;
         }
+        let expiry = last + Duration::seconds(policy.stale_after_seconds);
+        fresh_until = Some(fresh_until.map_or(expiry, |current| current.min(expiry)));
         if location.sample_count < policy.minimum_samples {
             fresh_but_small = true;
             continue;
@@ -242,8 +244,6 @@ pub fn evaluate_monitor(
         {
             recovering += 1;
         }
-        let expiry = last + Duration::seconds(policy.stale_after_seconds);
-        fresh_until = Some(fresh_until.map_or(expiry, |current| current.min(expiry)));
     }
 
     let enough = eligible >= policy.quorum.minimum_locations;
@@ -352,7 +352,9 @@ pub struct AggregationInput {
     pub evaluated_at: DateTime<Utc>,
 }
 
-/// 按规范优先级聚合 direct status。 / Aggregates direct status according to normative precedence.
+/// 按规范优先级聚合 direct status；未确认的关键 monitor 故障返回 `unknown` 而非伪造绿色。
+/// / Aggregates direct status by normative precedence; an unconfirmed critical-monitor
+/// failure returns `unknown` rather than manufacturing a green status.
 pub fn aggregate_status(input: &AggregationInput) -> DomainResult<Status> {
     if let Some(override_signal) = &input.operator_override {
         if override_signal.status == Status::Maintenance
@@ -396,7 +398,7 @@ pub fn aggregate_status(input: &AggregationInput) -> DomainResult<Status> {
     if input
         .monitors
         .iter()
-        .any(|monitor| monitor.critical && monitor.state == EvaluationState::Unknown)
+        .any(|monitor| monitor.critical && monitor.state != EvaluationState::Healthy)
     {
         return Ok(Status::Unknown);
     }
@@ -488,6 +490,20 @@ mod tests {
     }
 
     #[test]
+    fn warmup_sample_reports_finite_freshness_without_claiming_health() {
+        let mut warming = location("sin", 0);
+        warming.sample_count = 1;
+        let result =
+            evaluate_monitor(&policy(), EvaluationState::Unknown, &[warming], now()).unwrap();
+        assert_eq!(result.state, EvaluationState::Unknown);
+        assert_eq!(result.reason, EvaluationReason::InsufficientSamples);
+        assert_eq!(
+            result.fresh_until,
+            Some(now() + Duration::seconds(policy().stale_after_seconds))
+        );
+    }
+
+    #[test]
     fn direct_failure_beats_maintenance_and_unknown() {
         let input = AggregationInput {
             issues: vec![IssueSignal {
@@ -514,5 +530,36 @@ mod tests {
             ..AggregationInput::default()
         };
         assert_eq!(aggregate_status(&input).unwrap(), Status::Maintenance);
+    }
+
+    #[test]
+    fn unconfirmed_critical_failure_cannot_be_reported_operational() {
+        let input = AggregationInput {
+            monitors: vec![MonitorSignal {
+                critical: true,
+                state: EvaluationState::Failing,
+            }],
+            evaluated_at: now(),
+            ..AggregationInput::default()
+        };
+        assert_eq!(aggregate_status(&input).unwrap(), Status::Unknown);
+    }
+
+    #[test]
+    fn observed_issue_does_not_claim_outage_or_hide_failing_monitor() {
+        let input = AggregationInput {
+            issues: vec![IssueSignal {
+                state: IssueState::Observed,
+                impact: Status::MajorOutage,
+                covered_by_maintenance: false,
+            }],
+            monitors: vec![MonitorSignal {
+                critical: true,
+                state: EvaluationState::Failing,
+            }],
+            evaluated_at: now(),
+            ..AggregationInput::default()
+        };
+        assert_eq!(aggregate_status(&input).unwrap(), Status::Unknown);
     }
 }

@@ -189,7 +189,13 @@ mod tests {
             "repository_url":"https://github.com/moesegfault/identity",
             "git_commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","git_ref":"refs/heads/main",
             "artifact_digest":format!("sha256:{}","b".repeat(64)),"ci_provider":"github-actions",
-            "ci_run_id":"42","deployed_at":"2026-09-08T15:00:00Z","region":["global"],"artifacts":[]
+            "ci_run_id":"42","deployed_at":"2026-09-08T15:00:00Z","region":["global"],
+            "artifacts":[
+              {"kind":"other","file_name":"worker.js","media_type":"application/javascript","size_bytes":1024,
+               "artifact_digest":format!("sha256:{}","b".repeat(64))},
+              {"kind":"source_map","file_name":"worker.js.map","media_type":"application/json","size_bytes":2048,
+               "artifact_digest":format!("sha256:{}","c".repeat(64))}
+            ]
         }});
         assert_eq!(
             dispatch_json_native(&deployment.to_string()).unwrap(),
@@ -198,9 +204,9 @@ mod tests {
 
         let diagnostic = json!({"event_id":"0199d0a8-2e12-7a59-a51e-44aa9b6d1001","schema_version":"1.0",
             "kind":"dependency.unavailable","severity":"error","service_name":"identity","environment":"production",
-            "deployment_id":"0199d09a-b692-7ce0-a1c0-5138a43d7402","instance_id":null,
+            "deployment_id":"0199d09a-b692-7ce0-a1c0-5138a43d7402",
             "occurred_at":"2026-09-08T15:00:00Z","correlation_id":"0199d0a7-d771-7435-a388-bb6fa5d533fc",
-            "trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","span_id":null,"summary":"D1 unavailable",
+            "trace_id":"4bf92f3577b34da6a3ce929d0e0e4736","summary":"D1 unavailable",
             "fingerprint":{"dependency":"d1"},"evidence":[],"attributes":{}});
         let validate = json!({"operation":"validate_diagnostic_event","payload":diagnostic});
         assert_eq!(

@@ -51,7 +51,7 @@ pub struct Artifact {
     /// Manifest 内安全的 ASCII 文件名。 / Safe ASCII file name within the manifest.
     pub file_name: String,
     /// `sha256:<64 lowercase hex>` 内容摘要。 / `sha256:<64 lowercase hex>` content digest.
-    pub digest: String,
+    pub artifact_digest: String,
     /// 平台媒体类型。 / Media type.
     pub media_type: String,
     /// 字节大小。 / Size in bytes.
@@ -63,7 +63,7 @@ pub struct Artifact {
 impl Artifact {
     /// 校验摘要、文件名和符号 Build ID。 / Validates digest, file name, and symbol Build ID.
     pub fn validate(&self) -> DomainResult<()> {
-        validate_sha256(&self.digest, "artifact digest")?;
+        validate_sha256(&self.artifact_digest, "artifact digest")?;
         if self.media_type.trim().is_empty()
             || !valid_file_name(&self.file_name)
             || self.size_bytes == 0
@@ -80,6 +80,11 @@ impl Artifact {
         {
             return Err(DomainError::Validation(
                 "native binary and debug symbols require a stable build_id".into(),
+            ));
+        }
+        if self.kind == ArtifactKind::SourceMap && self.size_bytes > 8 * 1024 * 1024 {
+            return Err(DomainError::Validation(
+                "source_map declarations cannot exceed 8 MiB".into(),
             ));
         }
         Ok(())
@@ -154,6 +159,33 @@ impl DeploymentManifest {
                 return Err(DomainError::Validation(
                     "artifact kind and file_name must be unique per manifest".into(),
                 ));
+            }
+        }
+        let mut runtimes = self.artifacts.iter().filter(|artifact| {
+            matches!(artifact.kind, ArtifactKind::Binary | ArtifactKind::Other)
+                && artifact.artifact_digest == self.artifact_digest
+        });
+        let runtime = runtimes.next().ok_or_else(|| {
+            DomainError::Validation(
+                "exactly one binary or other artifact must match artifact_digest".into(),
+            )
+        })?;
+        if runtimes.next().is_some() {
+            return Err(DomainError::Validation(
+                "exactly one binary or other artifact must match artifact_digest".into(),
+            ));
+        }
+        if matches!(
+            runtime.media_type.as_str(),
+            "application/javascript" | "text/javascript"
+        ) {
+            let expected = format!("{}.map", runtime.file_name);
+            if !self.artifacts.iter().any(|artifact| {
+                artifact.kind == ArtifactKind::SourceMap && artifact.file_name == expected
+            }) {
+                return Err(DomainError::Validation(format!(
+                    "JavaScript runtime requires source_map `{expected}`"
+                )));
             }
         }
         Ok(())
@@ -444,7 +476,14 @@ mod tests {
             ci_run_id: "1234".into(),
             deployed_at: Utc.with_ymd_and_hms(2026, 9, 8, 15, 0, 0).unwrap(),
             region: vec!["global".into()],
-            artifacts: vec![],
+            artifacts: vec![Artifact {
+                kind: ArtifactKind::Other,
+                file_name: "worker.wasm".into(),
+                artifact_digest: format!("sha256:{}", "b".repeat(64)),
+                media_type: "application/wasm".into(),
+                size_bytes: 1024,
+                build_id: None,
+            }],
         }
     }
 
@@ -493,5 +532,54 @@ mod tests {
     #[test]
     fn rejects_uuid_versions_other_than_v7() {
         assert!(validate_uuid_v7("627cc493-f310-47de-96bd-71410b7dec09", "id").is_err());
+    }
+
+    #[test]
+    fn manifest_requires_exactly_one_digest_matching_runtime() {
+        let mut value = manifest();
+        value.artifacts.clear();
+        assert!(value.validate().is_err());
+
+        value.artifacts.push(Artifact {
+            kind: ArtifactKind::Sbom,
+            file_name: "sbom.json".into(),
+            artifact_digest: value.artifact_digest.clone(),
+            media_type: "application/json".into(),
+            size_bytes: 42,
+            build_id: None,
+        });
+        assert!(value.validate().is_err());
+
+        value.artifacts = manifest().artifacts;
+        value.artifacts.push(Artifact {
+            kind: ArtifactKind::Other,
+            file_name: "duplicate.wasm".into(),
+            artifact_digest: value.artifact_digest.clone(),
+            media_type: "application/wasm".into(),
+            size_bytes: 42,
+            build_id: None,
+        });
+        assert!(value.validate().is_err());
+    }
+
+    #[test]
+    fn javascript_runtime_requires_exact_named_bounded_source_map() {
+        let mut value = manifest();
+        value.artifacts[0].file_name = "worker.js".into();
+        value.artifacts[0].media_type = "application/javascript".into();
+        assert!(value.validate().is_err());
+
+        value.artifacts.push(Artifact {
+            kind: ArtifactKind::SourceMap,
+            file_name: "worker.js.map".into(),
+            artifact_digest: format!("sha256:{}", "c".repeat(64)),
+            media_type: "application/json".into(),
+            size_bytes: 8 * 1024 * 1024,
+            build_id: None,
+        });
+        value.validate().unwrap();
+
+        value.artifacts[1].size_bytes += 1;
+        assert!(value.validate().is_err());
     }
 }
