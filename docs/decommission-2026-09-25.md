@@ -18,6 +18,14 @@ The four `moesegfault-status-*` Queues remained present after Worker removal. Th
 
 The last successful production acceptance on 2026-09-12 remains historical only. The exact decommission verification used Cloudflare's Worker Domains, Worker Scripts, and Queues APIs plus public DNS-over-HTTPS; no application release or code upload occurred during retirement.
 
+## Operational outcome for future maintainers
+
+Do not equate successful Worker deployment, login, API smoke tests, or an active release registry pointer with an operating monitoring service. At the 2026-09-25 [retirement data audit](retirement-data-audit-2026-09-25.md), the D1 database had **zero configured monitors, zero current statuses, zero status transitions, zero issues, and zero incidents**. No external target was configured, and there was not even a monitor establishing a self-monitoring loop. The three service identities (`status`, `ops-gateway`, `probe-executor`) and their derived target records describe catalog and release provenance, **not evidence of active monitoring**.
+
+Analytics Engine did contain status Worker's own Cron and HTTP runtime metrics, but no `probe.observation` metric. Its presence proves instrumentation executed, not that any business service was observed or judged healthy. The retained D1/R2 data is principally release artifacts, provenance, audit and idempotency history. The four Queues had zero backlog at the audit snapshot; six historical outbox events remained pending in D1. These distinctions are essential if this repository is used as a reference for a future status platform.
+
+All retained data resources were left untouched. The audit found good D1 structural checks and D1-to-R2 metadata reconciliation, but did **not** establish a long-term off-account backup, object-body hash verification, or a restore exercise. Consult the linked audit before changing retention or deleting credentials.
+
 ## References
 
 - [Cloudflare Worker Custom Domains](https://developers.cloudflare.com/workers/configuration/routing/custom-domains/)
