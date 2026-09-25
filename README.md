@@ -1,5 +1,7 @@
 # moeSegFault Status
 
+**Retired on 2026-09-25.** The three project Workers were deleted, and the `status.moesegfault.dev` and `ops.moesegfault.dev` custom domains were detached. These endpoints are no longer available. The deployment and integration instructions below are historical; see [decommission record](docs/decommission-2026-09-25.md).
+
 Rust 实现的 Cloudflare Workers 运维后端，TypeScript 实现的运维前端。 / A Rust Cloudflare Workers operations backend with a TypeScript operations frontend.
 
 **截至 2026-09-12，三个 Rust Worker 已通过 GitHub Actions 发布并激活，真实浏览器登录、跨域读取及注销已验证；尚未登记外部监控目标或启用通知。** / **As verified on 2026-09-12, all three Rust Workers were released through GitHub Actions and activated; real browser login, cross-origin reads and logout passed. External monitor targets and notifications remain unconfigured.**

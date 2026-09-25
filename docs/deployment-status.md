@@ -1,5 +1,7 @@
 # 云端执行记录 / Cloud execution record
 
+**Historical record:** The service was retired on 2026-09-25. The production acceptance and resource states below describe earlier checkpoints, not the current deployment. See [decommission record](decommission-2026-09-25.md).
+
 ## 最终生产验收 / Final production acceptance
 
 2026-09-12 23:27 +08:00：以下结果取代下方早期截点的待办状态。 / These results supersede the outstanding state at the earlier cutoff below.
